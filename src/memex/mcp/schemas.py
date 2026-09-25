@@ -300,6 +300,13 @@ def _input_schema(spec: dict[str, Any]) -> dict[str, Any]:
 
 
 def _output_schema(spec: dict[str, Any]) -> dict[str, Any]:
+    """工具的 outputSchema。
+
+    MCP 官方 SDK 强制要求根为 ``{"type":"object"}``（否则客户端 zod 报
+    ``expected "object"``），所以这里把 ``oneOf`` 放在一个 object 根之下：
+    根级 ``properties`` 列出 ``ok``/``error`` 便于校验器推断，``oneOf`` 再精确区分
+    「错误信封 / payload」两分支。
+    """
     payload: dict[str, Any] = {
         "type": "object",
         "additionalProperties": True,
@@ -307,7 +314,20 @@ def _output_schema(spec: dict[str, Any]) -> dict[str, Any]:
     }
     if spec["payload_required"]:
         payload["required"] = ["ok", *spec["payload_required"]]
-    return {"oneOf": [TOOL_ERROR_SCHEMA, payload]}
+    return {
+        "type": "object",
+        "properties": {
+            "ok": {"type": "boolean"},
+            "error": {
+                "type": "object",
+                "properties": {"code": {"type": "string"}, "message": {"type": "string"}},
+                "required": ["code", "message"],
+            },
+        },
+        "required": ["ok"],
+        "additionalProperties": True,
+        "oneOf": [TOOL_ERROR_SCHEMA, payload],
+    }
 
 
 def tool_definitions() -> list[dict[str, Any]]:

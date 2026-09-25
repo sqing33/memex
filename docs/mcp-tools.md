@@ -204,9 +204,26 @@
 }
 ```
 
-> **outputSchema 的统一写法**：每个工具的 `outputSchema` 是
-> `{"oneOf": [{"$ref": "#/$defs/ToolError"}, {"<下列 payload，其 ok 为 const true>"}]}`。
-> 下文只给 **payload**（`ok:true` 分支），不重复 `ToolError`。
+> **outputSchema 的统一写法**：MCP 官方 SDK 要求 `outputSchema` 的**根必须是
+> `{"type":"object"}`**（否则客户端 zod 校验报 `expected "object"`，见 `gaps.md` G2 实测项）。
+> 因此每个工具的 `outputSchema` 统一为：
+>
+> ```json
+> {
+>   "type": "object",
+>   "properties": {
+>     "ok": { "type": "boolean" },
+>     "error": { "type": "object", "required": ["code", "message"] }
+>   },
+>   "required": ["ok"],
+>   "additionalProperties": true,
+>   "oneOf": [{"$ref": "#/$defs/ToolError"}, {"<下列 payload，其 ok 为 const true>"}]
+> }
+> ```
+>
+> 即：根 `type:"object"`（SDK 硬性要求）+ 顶层 `properties` 列出 `ok`/`error`（便于校验器
+> 推断）+ `oneOf` 精确区分「错误信封 / payload」两分支。下文只给 **payload**
+> （`ok:true` 分支），不重复 `ToolError`。
 
 ---
 
