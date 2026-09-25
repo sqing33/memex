@@ -133,8 +133,16 @@ git clone https://$TOKEN@github.com/me/private.git
    - 更低 → 有迁移函数则跑，否则提示 `memex migrate`。
 3. `meta.embedder` / `meta.dim` 存在；`chunk_vectors` 中无异构 `embedder` 行
    （若有 → 警告并提示 `memex reindex`，**不阻止启动**，但检索会被拒）。
-4. 嵌入模型可加载；加载失败 → **拒绝启动**（`serve-mcp` / `serve-http` 都拒）并给三条出路：
-   预置模型文件 / `MEMEX_EMBEDDER=http:<url>` / **显式** `MEMEX_EMBEDDER=hash:512`。
+4. 嵌入模型：启动检查**不同步加载**真模型——同步加载会阻塞 MCP `initialize` 响应，
+   且离线环境下的联网回源可能挂几分钟（客户端 60s 超时即断连）。检查阶段只做**快速校验**：
+   - `spec` 为 ST 裸名 / `sentence-transformers:<名>` 且**本地 HF 缓存缺失** → 打警告
+     （提示预置模型文件），**不阻止启动**；
+   - 真模型改为**后台线程预热**（进程起来后 load 进内存），`initialize` 立即返回。
+   预热或首次用到嵌入器时加载失败 → **不静默降级**，在**首次需要嵌入的工具调用**上
+   显式返回错误（`internal`），并给三条出路：预置模型文件 / `MEMEX_EMBEDDER=http:<url>` /
+   **显式** `MEMEX_EMBEDDER=hash:512`。联网加载设**墙钟上限**（默认 20s，
+   `MEMEX_EMBEDDER_LOAD_TIMEOUT` 可调），超时即报错而非无限挂起；**失败结果被缓存**，
+   后续调用立即报同一错误（不重复等待）。
    **只有显式写 `hash:512` 才降级**，且启动横幅与 `recall_stats` 必须带
    `degraded:true, embedder:"hash"`——**默认路径绝不静默退 hash**（D1：hash 无语义 = 跨语言卖点消失）。
 5. `MEMEX_TOOLS` 解析成功；打印放行集。

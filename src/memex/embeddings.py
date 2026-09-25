@@ -16,6 +16,7 @@ import json
 import math
 import os
 import struct
+import threading
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -93,6 +94,86 @@ def _sanitize_no_proxy_env() -> None:
         os.environ[key] = ",".join(kept)
 
 
+def _load_timeout_seconds() -> float:
+    """联网加载真模型的墙钟上限（秒）；可用 MEMEX_EMBEDDER_LOAD_TIMEOUT 覆盖。
+
+    默认 20s：给客户端 60s 工具调用超时留足余量，确保失败以显式错误返回。
+    """
+    raw = os.environ.get("MEMEX_EMBEDDER_LOAD_TIMEOUT")
+    if raw:
+        try:
+            v = float(raw)
+            if v > 0:
+                return v
+        except ValueError:
+            pass
+    return 20.0
+
+
+def _run_with_deadline(fn: Callable[[], Any], seconds: float, label: str) -> Any:
+    """在后台线程里执行 fn，超过 seconds 未返回即抛 MemexError（不静默降级）。
+
+    网络不可达时 huggingface_hub 会带退避重试，单次调用可能挂几分钟；此护栏保证
+    失败能**显式**返回而不是无限挂起（守 D1/G22）。超时后工作线程为 daemon，随进程退出。
+    """
+    box: dict[str, Any] = {}
+
+    def _worker() -> None:
+        try:
+            box["v"] = fn()
+        except BaseException as exc:  # noqa: BLE001 - 原样回传
+            box["e"] = exc
+
+    th = threading.Thread(target=_worker, name="memex-embedder-load", daemon=True)
+    th.start()
+    th.join(seconds)
+    if th.is_alive():
+        raise MemexError(
+            "internal",
+            "嵌入模型加载超时（>%ds）：%s" % (int(seconds), label),
+            {
+                "reason": "load timeout",
+                "outs": [
+                    "预置模型文件到 HF 缓存（离线可用）",
+                    "MEMEX_EMBEDDER=http:<url> 指向远端嵌入接口",
+                    "仅调试可显式 MEMEX_EMBEDDER=hash:512（无语义，degraded:true）",
+                ],
+            },
+        )
+    if "e" in box:
+        exc = box["e"]
+        if isinstance(exc, MemexError):
+            raise exc
+        raise MemexError("internal", "加载嵌入模型失败：" + str(exc), {"reason": str(exc)}) from exc
+    return box.get("v")
+
+
+def _st_load_online(model_name: str) -> Any:
+    """联网拉取一次模型（本地无缓存时）。
+
+    给 huggingface_hub 的元数据/下载设置**有界超时**：默认值在坏代理下会触发
+    多轮 http_backoff，把一次调用拖到几分钟；有界后失败也能在数十秒内返回，
+    从而保证「显式报错」而不是无限挂起。
+    """
+    import os
+
+    keys = ("HF_HUB_ETAG_TIMEOUT", "HF_HUB_DOWNLOAD_TIMEOUT")
+    saved = {k: os.environ.get(k) for k in keys}
+    for k in keys:
+        if os.environ.get(k) is None:
+            os.environ[k] = "15"
+    try:
+        from sentence_transformers import SentenceTransformer  # type: ignore
+
+        return SentenceTransformer(model_name)
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 def _st_embedder(model_name: str) -> Embedder:
     """sentence-transformers 后端（可选依赖）。未安装 -> MemexError。"""
     _sanitize_no_proxy_env()
@@ -105,12 +186,32 @@ def _st_embedder(model_name: str) -> Embedder:
             {"model": model_name, "install": "uv pip install 'memex[default]'"},
         ) from exc
     try:
-        model = SentenceTransformer(model_name)
-    except Exception as exc:  # pragma: no cover
+        # 离线优先：命中本地 HF 缓存即不联网；仅当本地没有才联网下载一次。
+        # （联网回源会被代理拖住并触发 http_backoff 重试，是 initialize 超时的元凶。）
+        try:
+            model = SentenceTransformer(model_name, local_files_only=True)
+        except Exception:  # noqa: BLE001 - 本地无缓存 -> 联网拉取一次（有界）
+            model = _run_with_deadline(
+                lambda: _st_load_online(model_name),
+                _load_timeout_seconds(),
+                "联网下载 " + model_name,
+            )
+    except Exception as exc:
         raise MemexError(
-            "internal", "加载本地嵌入模型失败", {"model": model_name, "reason": str(exc)}
+            "internal",
+            "嵌入模型不可用：" + str(exc),
+            {
+                "model": model_name,
+                "reason": str(exc),
+                "outs": [
+                    "预置模型文件到 HF 缓存（离线可用）",
+                    "MEMEX_EMBEDDER=http:<url> 指向远端嵌入接口",
+                    "仅调试可显式 MEMEX_EMBEDDER=hash:512（无语义，degraded:true）",
+                ],
+            },
         ) from exc
-    dim = int(model.get_sentence_embedding_dimension() or ALL_MINILM_DIM)
+    _dim_fn = getattr(model, "get_embedding_dimension", None) or model.get_sentence_embedding_dimension
+    dim = int(_dim_fn() or ALL_MINILM_DIM)
 
     def fn(texts: list[str]) -> list[list[float]]:
         arr = model.encode(texts, normalize_embeddings=True)
@@ -144,12 +245,44 @@ def _http_call(url: str, texts: list[str]) -> dict[str, Any]:
         raise MemexError("internal", "调用 HTTP 嵌入接口失败", {"url": url, "reason": str(exc)}) from exc
 
 
-def get_embedder(spec: str | None) -> Embedder:
-    """按规格构造嵌入器。
+def local_model_cached(spec: str) -> bool:
+    """轻量探测：给定 ST 模型名是否已在本地 HF 缓存（不 import torch / 不联网）。
 
-    spec 形如 "hash:512" / "sentence-transformers:<model>" / "http:<url>"；
-    为 None 或空时用默认真语义模型（D1）。
+    仅用 huggingface_hub 的 try_to_load_from_cache 查 config.json 是否落盘，
+    用于启动横幅提前给出「未缓存」提示；探测失败一律当作未缓存（保守）。
     """
+    name = (spec or "").strip()
+    if name.startswith("sentence-transformers:"):
+        name = name.split(":", 1)[1] or DEFAULT_MODEL
+    if "/" not in name:
+        name = "sentence-transformers/" + name
+    try:
+        from huggingface_hub import try_to_load_from_cache
+    except Exception:  # noqa: BLE001
+        return False
+    try:
+        res = try_to_load_from_cache(name, "config.json")
+        return isinstance(res, str)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+_EMBEDDER_CACHE: dict[str, Embedder] = {}
+_EMBEDDER_ERRORS: dict[str, MemexError] = {}
+_EMBEDDER_LOCK = threading.Lock()
+
+
+def _cache_key(spec: str | None) -> str:
+    """把等价规格归一到同一缓存键（None / 裸名 / sentence-transformers:名 同键）。"""
+    s = (spec or "").strip()
+    if not s:
+        return DEFAULT_MODEL
+    if s.startswith("sentence-transformers:"):
+        return s.split(":", 1)[1] or DEFAULT_MODEL
+    return s
+
+
+def _build_embedder(spec: str | None) -> Embedder:
     if not spec:
         return _st_embedder(DEFAULT_MODEL)
     low = spec.strip()
@@ -165,6 +298,44 @@ def get_embedder(spec: str | None) -> Embedder:
         return _st_embedder(low.split(":", 1)[1] or DEFAULT_MODEL)
     # 裸模型名等价于 sentence-transformers:<name>
     return _st_embedder(low)
+
+
+def get_embedder(spec: str | None) -> Embedder:
+    """按规格构造嵌入器（进程内按规格缓存）。
+
+    spec 形如 "hash:512" / "sentence-transformers:<model>" / "http:<url>"；
+    为 None 或空时用默认真语义模型（D1）。
+
+    真模型加载昂贵（import torch + 权重，冷启动十几秒），因此**进程内按 spec 缓存**：
+    后台预热与首个工具调用共享同一句柄，只加载一次。
+    """
+    key = _cache_key(spec)
+    cached = _EMBEDDER_CACHE.get(key)
+    if cached is not None:
+        return cached
+    err = _EMBEDDER_ERRORS.get(key)
+    if err is not None:
+        raise err
+    with _EMBEDDER_LOCK:
+        cached = _EMBEDDER_CACHE.get(key)
+        if cached is not None:
+            return cached
+        err = _EMBEDDER_ERRORS.get(key)
+        if err is not None:
+            raise err
+        try:
+            cached = _build_embedder(spec)
+        except MemexError as exc:
+            _EMBEDDER_ERRORS[key] = exc
+            raise
+        except Exception as exc:  # noqa: BLE001 - 归一为 MemexError 并缓存
+            wrapped = MemexError(
+                "internal", "构建嵌入器失败：" + str(exc), {"spec": key, "reason": str(exc)}
+            )
+            _EMBEDDER_ERRORS[key] = wrapped
+            raise wrapped from exc
+        _EMBEDDER_CACHE[key] = cached
+        return cached
 
 
 # —— 暴力余弦（app 层回退；sqlite-vec 不可用时使用）——

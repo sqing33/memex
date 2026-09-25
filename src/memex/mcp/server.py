@@ -179,6 +179,7 @@ def serve_stdio(cfg: Config | None = None) -> None:
     cfg = _with_is_http(cfg, False)
     _startup_or_exit(cfg)
     server = Server(cfg)
+    server.rt.warm()  # 后台预热嵌入模型，不阻塞 initialize（D1/G22）
     stdin = sys.stdin
     stdout = sys.stdout
     try:
@@ -219,6 +220,7 @@ def serve_http(cfg: Config | None = None, *, host: str = "127.0.0.1", port: int 
     resolved: Config = _with_is_http(cfg or Config.from_env(), True)
     _startup_or_exit(resolved)
     server = Server(resolved)
+    server.rt.warm()  # 后台预热嵌入模型，不阻塞 initialize（D1/G22）
     sessions: set[str] = set()
 
     class Handler(BaseHTTPRequestHandler):

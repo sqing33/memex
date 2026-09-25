@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import shutil
 import sqlite3
+import threading
 from typing import Any, Callable, TypeVar, cast
 
 from .. import constants, core, store
@@ -71,6 +72,8 @@ class Runtime:
         self.client_name = client_name
         self._conn: sqlite3.Connection | None = None
         self._embedder: Embedder | None = None
+        self._embedder_error: MemexError | None = None
+        self._warm_started = False
 
     @property
     def conn(self) -> sqlite3.Connection:
@@ -78,15 +81,64 @@ class Runtime:
             self._conn = store.connect(self.cfg.paths.db)
         return self._conn
 
+    def _resolve_embedder_spec(self) -> str | None:
+        """解析当前应使用的嵌入器规格（配置优先，其次库 meta）。
+
+        用**独立短连接**读 meta：绝不碰 self._conn，避免把共享连接绑定到
+        预热线程（SQLite 连接有线程亲和性）。
+        """
+        if self.cfg.embedder:
+            return self.cfg.embedder
+        conn = store.connect(self.cfg.paths.db)
+        try:
+            return store.get_meta(conn, "embedder")
+        finally:
+            conn.close()
+
     def embedder(self) -> Embedder:
-        if self._embedder is None:
-            spec = self.cfg.embedder or store.get_meta(self.conn, "embedder")
+        """取嵌入器句柄；真模型首次使用时加载（get_embedder 进程内缓存）。
+
+        若后台预热已失败，直接抛出预热时记录的错误：既不每次调用都重试加载，
+        也不静默降级（守 D1/G22）。
+        """
+        if self._embedder is not None:
+            return self._embedder
+        if self._embedder_error is not None:
+            raise self._embedder_error
+        spec = self._resolve_embedder_spec()
+        try:
             self._embedder = get_embedder(spec)
+        except MemexError as exc:
+            self._embedder_error = exc
+            raise
         return self._embedder
+
+    def warm(self) -> None:
+        """后台线程预热真模型（不阻塞 initialize / tools/list）。
+
+        失败时把错误记录到 _embedder_error，由首次 embedder() 显式抛出。
+        """
+        if self._warm_started:
+            return
+        self._warm_started = True
+
+        def _run() -> None:
+            try:
+                self.embedder()
+            except Exception as exc:  # noqa: BLE001
+                if not isinstance(exc, MemexError):
+                    self._embedder_error = MemexError(
+                        "internal", "加载嵌入模型失败", {"reason": str(exc)}
+                    )
+
+        threading.Thread(target=_run, name="memex-embedder-warm", daemon=True).start()
 
     def close(self) -> None:
         if self._conn is not None:
-            self._conn.close()
+            try:
+                self._conn.close()
+            except Exception:  # noqa: BLE001 - 连接可能绑定在其他线程
+                pass
             self._conn = None
 
 
