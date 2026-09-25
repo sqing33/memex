@@ -20,6 +20,7 @@ from typing import Any
 from .. import __version__
 from ..core import Config
 from . import handlers
+from ..startup import run_startup_check, startup_banner
 from .handlers import ProtocolError, Runtime
 
 PROTOCOL_VERSION = "2025-06-18"
@@ -155,9 +156,28 @@ _NOTIFICATION = _Notification()
 # --------------------------------------------------------------------------- #
 # stdio 传输
 # --------------------------------------------------------------------------- #
+def _startup_or_exit(cfg: Config) -> dict[str, Any]:
+    """跑启动检查；失败则打印可读提示并以非零码退出（operations.md §4）。"""
+    from ..core import MemexError
+    try:
+        summary = run_startup_check(cfg)
+    except MemexError as exc:
+        sys.stderr.write("memex 启动失败 [" + exc.code + "]：" + exc.message + "\n")
+        for out in (exc.details or {}).get("outs") or []:
+            sys.stderr.write("  - " + str(out) + "\n")
+        sys.stderr.flush()
+        raise SystemExit(2) from exc
+    sys.stderr.write(startup_banner(summary) + "\n")
+    for w in summary.get("warnings") or []:
+        sys.stderr.write("memex 警告：" + str(w) + "\n")
+    sys.stderr.flush()
+    return summary
+
+
 def serve_stdio(cfg: Config | None = None) -> None:
     cfg = cfg or Config.from_env()
     cfg = _with_is_http(cfg, False)
+    _startup_or_exit(cfg)
     server = Server(cfg)
     stdin = sys.stdin
     stdout = sys.stdout
@@ -197,8 +217,7 @@ def serve_http(cfg: Config | None = None, *, host: str = "127.0.0.1", port: int 
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     resolved: Config = _with_is_http(cfg or Config.from_env(), True)
-    if not resolved.token:
-        raise RuntimeError("远程形态必须设置 MEMEX_TOKEN（E16）")
+    _startup_or_exit(resolved)
     server = Server(resolved)
     sessions: set[str] = set()
 
