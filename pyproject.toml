@@ -30,5 +30,11 @@ packages = ["src/memex"]
 python_version = "3.11"
 strict = true
 
+# 可选依赖边界：sentence-transformers / tree-sitter 未安装时靠 `# type: ignore` 兜底，
+# 安装后该 ignore 会变成 unused；这两个模块关掉 unused-ignore 警告，其余模块保持严格。
+[[tool.mypy.overrides]]
+module = ["memex.embeddings", "memex.evidence.symbols"]
+warn_unused_ignores = false
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

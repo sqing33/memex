@@ -53,7 +53,11 @@ def test_lifecycle_and_recycle(tmp_path: Path):
         assert s2["meta"]["turns"] == 2 and s2["meta"]["tokens_est"] == 100
         set_state(conn, s2, "validated")
         assert find_active_session(conn, "github.com__o__r", "sha1")["session_id"] == sid
-        # TTL=0 -> 立刻到期：第一步归档，第二步留痕
+        # 把 expires_at 钉死在过去，避免同秒边界抖动；第一步归档，第二步留痕
+        conn.execute(
+            "UPDATE sessions SET expires_at = ? WHERE session_id = ?",
+            ("2000-01-01T00:00:00Z", sid),
+        )
         res = sweep(conn, cfg)
         assert res["archived"] == 1, res
         row = conn.execute("SELECT state, abandoned_at FROM sessions WHERE session_id=?", (sid,)).fetchone()
