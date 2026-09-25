@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "memex"
+version = "0.0.1"
+description = "agent 驱动的跨仓库「实现借鉴」知识库"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = []
+
+[project.optional-dependencies]
+# 默认层（tech-design.md §3.2）：向量化余弦 + 嵌入
+default = ["numpy>=1.26", "sentence-transformers>=2.5"]
+# 可选层：多语言语法校验
+analysis = ["tree-sitter>=0.21"]
+# 远程 HTTP 形态（缺省时退标准库 http.server）
+http = ["uvicorn>=0.29", "starlette>=0.37"]
+dev = ["pytest>=8", "mypy>=1.10"]
+
+[project.scripts]
+memex = "memex.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/memex"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
