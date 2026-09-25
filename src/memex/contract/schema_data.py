@@ -1,0 +1,463 @@
+"""memex 报告契约的机器可读版本（由 docs/report.schema.json 生成，勿手改）。
+
+docs/report.schema.json 是唯一事实源；改契约请先改 docs，再运行：
+    python3 tools/gen_schema_data.py
+校验器 contract/validator.py 直接读本模块的 SCHEMA。
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+_RAW = r'''
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://memex.local/contract/report.schema.json",
+  "title": "memex report contract",
+  "x-contract-id": "memex/report/1",
+  "x-contract-version": "1",
+  "x-summary": "一份仓库分析报告的机器可读契约。agent 按它产出，server 用它校验，help(report-contract) 用它渲染散文。三处同源，不漂移。",
+  "x-notes": {
+    "language": "报告与卡片正文用用户母语；`mechanism_desc` 与 `intent` 必须英文（G13）",
+    "unknown_fields": "一律拒绝（additionalProperties:false，A4）",
+    "principle_units": "段落长度按「单元」计：CJK 字符各计 1，拉丁/数字词各计 1（见 x-counting）",
+    "evidence": "evidence 的 path 必须是仓库中真实存在的文件，行号必须在文件行数范围内；不一致即阻塞",
+    "code": "snippet/skeleton 卡必须有 code_spans，且由服务端从真实文件重切覆盖；不一致计入 code_mismatch（硬门禁 0）"
+  },
+  "x-counting": {
+    "rule": "units = (CJK/仮名/ハングル 字符数) + (拉丁字母/数字 连续串数)",
+    "regex_cjk": "[\\u3400-\\u4dbf\\u4e00-\\u9fff\\u3040-\\u30ff\\uac00-\\ud7af]",
+    "regex_word": "[A-Za-z0-9_]+",
+    "min_principle_units": 40,
+    "min_summary_units": 12,
+    "min_intent_units": 5,
+    "note": "阈值来自 recall 的 min_principle_chars=40 的等价换算；待 V1/V2 实测后按分布调整（gaps.md G23）"
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_id",
+    "one_liner",
+    "characteristics",
+    "entry_points",
+    "features",
+    "cross_feature_risks"
+  ],
+  "properties": {
+    "schema_id": {
+      "const": "memex/report/1",
+      "description": "契约标识；agent 必须原样回填"
+    },
+    "one_liner": {
+      "type": "string",
+      "minLength": 10,
+      "description": "一句话说明这个仓库是什么、做什么"
+    },
+    "characteristics": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "description": "项目特征与招牌实现（渲染为第 1 个 H2）",
+      "items": {
+        "$ref": "#/$defs/Characteristic"
+      }
+    },
+    "entry_points": {
+      "type": "array",
+      "minItems": 1,
+      "description": "程序入口与装配点",
+      "items": {
+        "$ref": "#/$defs/EntryPoint"
+      }
+    },
+    "features": {
+      "type": "array",
+      "minItems": 3,
+      "description": "功能级知识单元；每个功能 = 五原理轴 + 卡片 + 意图探针",
+      "items": {
+        "$ref": "#/$defs/Feature"
+      }
+    },
+    "cross_feature_risks": {
+      "type": "array",
+      "minItems": 1,
+      "description": "跨功能耦合与系统风险（渲染为第 4 个 H2）",
+      "items": {
+        "$ref": "#/$defs/Risk"
+      }
+    }
+  },
+  "$defs": {
+    "EvidenceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "仓库内相对路径，posix 分隔符，必须真实存在"
+        },
+        "start_line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "end_line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "symbol": {
+          "type": "string",
+          "description": "该区间对应的符号名（如有）"
+        },
+        "note": {
+          "type": "string",
+          "description": "这一处证据说明了什么"
+        }
+      }
+    },
+    "Characteristic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "title",
+        "detail",
+        "evidence"
+      ],
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 3
+        },
+        "detail": {
+          "type": "string",
+          "minLength": 15
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          }
+        }
+      }
+    },
+    "EntryPoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "role"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string",
+          "minLength": 4
+        },
+        "kind": {
+          "enum": [
+            "main",
+            "cli",
+            "server",
+            "worker",
+            "test",
+            "config",
+            "build",
+            "docs"
+          ]
+        }
+      }
+    },
+    "Principles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runtime_control_flow",
+        "data_flow",
+        "state_lifecycle",
+        "failure_recovery",
+        "concurrency_timing"
+      ],
+      "description": "五个原理轴。固定轴 = 跨仓报告可比 = 聚类才有意义。全部必填，不得写 N/A / 未知 / 待补充 / TODO。注意：`minLength: 30` 只是**粗粒度的字节下限**；权威阈值是按信息单元计的 `x-counting.min_principle_units = 40`（校验器两者都查）。",
+      "properties": {
+        "runtime_control_flow": {
+          "type": "string",
+          "minLength": 30,
+          "x-label": "运行/控制流",
+          "description": "控制如何流转：谁调用谁、何时触发、循环/递归边界、提前返回条件"
+        },
+        "data_flow": {
+          "type": "string",
+          "minLength": 30,
+          "x-label": "数据流",
+          "description": "数据从哪来、经过什么结构、到哪去、在哪被转换/序列化"
+        },
+        "state_lifecycle": {
+          "type": "string",
+          "minLength": 30,
+          "x-label": "状态生命周期",
+          "description": "有哪些状态、谁创建/变更/销毁、持久化在哪、何时失效"
+        },
+        "failure_recovery": {
+          "type": "string",
+          "minLength": 30,
+          "x-label": "失败与恢复",
+          "description": "失败如何被检测、降级、重试、回滚、上报"
+        },
+        "concurrency_timing": {
+          "type": "string",
+          "minLength": 30,
+          "x-label": "并发与时序",
+          "description": "并发模型、锁/队列/超时/顺序保证、竞态如何被避免"
+        }
+      }
+    },
+    "CodeSpan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "start_line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "end_line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "symbol": {
+          "type": "string"
+        }
+      },
+      "description": "A1：卡片代码为有序段列表（单段即只给一个元素），渲染时多段之间插 `// … (elided) …`"
+    },
+    "Card": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "title",
+        "summary",
+        "reusable",
+        "mechanism_desc",
+        "evidence"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "mechanism",
+            "snippet",
+            "skeleton",
+            "gotcha",
+            "decision"
+          ],
+          "description": "五类，定义 + 正例 + 反例见 x-card-kind-anchors"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 3
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 12,
+          "description": "可直接复用的实现要点（用户母语）"
+        },
+        "mechanism_desc": {
+          "type": "string",
+          "minLength": 20,
+          "description": "★ 建向量的文本。必须英文：一句语言中立的机制描述，讲清「怎么做」而非「这段代码长什么样」（G13 / §2.5）"
+        },
+        "language": {
+          "type": "string",
+          "description": "实现语言，小写（go / python / typescript / rust …）"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]*$"
+          },
+          "description": "小写标签，用于 FTS/keyword 通道"
+        },
+        "reusable": {
+          "type": "boolean",
+          "description": "是否值得借鉴。只有 reusable 的卡参与聚类与召回建 chunk"
+        },
+        "symbol": {
+          "type": "string",
+          "description": "主符号名（如有）"
+        },
+        "code_spans": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CodeSpan"
+          },
+          "description": "证据锚点。kind ∈ {snippet, skeleton} 时必填且非空；其余 kind 不允许出现"
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "description": "该卡片的证据锚点（写库时落到 evidence 表，card_id 外键）"
+        },
+        "code": {
+          "type": "string",
+          "description": "agent 给出的代码原文，仅用于与服务端真实重切的切片比对，不落库、不回显"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "snippet",
+                  "skeleton"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "code_spans"
+            ],
+            "properties": {
+              "code_spans": {
+                "minItems": 1
+              }
+            }
+          },
+          "else": {
+            "not": {
+              "required": [
+                "code_spans"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "Feature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "title",
+        "summary",
+        "principles",
+        "evidence",
+        "cards",
+        "intent"
+      ],
+      "properties": {
+        "key": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+          "description": "kebab-case，仓内唯一"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 3
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 12,
+          "description": "这个功能解决什么问题、外部行为是什么"
+        },
+        "principles": {
+          "$ref": "#/$defs/Principles"
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          }
+        },
+        "cards": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/Card"
+          }
+        },
+        "intent": {
+          "type": "string",
+          "minLength": 10,
+          "description": "★ 意图探针：一句英文「什么需求会想借鉴这个」（§2.5 ④）。独立于聚类，是 pattern_intents 的来源。英文，语言中立"
+        }
+      }
+    },
+    "Risk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "title",
+        "detail",
+        "evidence"
+      ],
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 3
+        },
+        "detail": {
+          "type": "string",
+          "minLength": 15
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          }
+        }
+      }
+    }
+  },
+  "x-card-kind-anchors": {
+    "note": "B6：每种 kind 给「定义 + 正例 + 反例」。反例即被明令禁止的写法。这里与 report-contract.md 同源。",
+    "mechanism": {
+      "definition": "解释「怎么运转」的一句话机制，不含代码。用于跨仓/跨语言比对——同一机制的不同语言实现应落成同一条。",
+      "positive": "Backoff grows multiplicatively (base × factor^attempt) and is clamped by a configurable cap before each sleep; jitter is applied after clamping to avoid synchronized retries.",
+      "negative": "见 internal/retry/backoff.go 的 computeBackoff 函数。（这是定位而非机制——没有讲清怎么运转）"
+    },
+    "snippet": {
+      "definition": "可直接粘贴复用的真实代码片段，自包含、可独立读懂，必须配 code_spans 指向真实文件。",
+      "positive": "一段 15 行的 computeBackoff：输入 attempt、读取 base/factor/cap 配置、返回带 jitter 的时长；code_spans 指向 src/retry.py 12-30。",
+      "negative": "只给一句描述、不给代码；或给出代码但行号对不上真实文件（后者会被 code_mismatch 拦截）。"
+    },
+    "skeleton": {
+      "definition": "结构骨架：函数/类签名与关键分支，省略次要实现细节，足以照着重写一遍。",
+      "positive": "RetryEngine.run(fn) 的骨架：循环 attempts → 调用 fn → 成功返回 → 失败判断可重试 → 计算退避 → sleep → 超预算抛错；每步留注释说明。",
+      "negative": "把整个文件贴进来（那是 snippet 甚至噪声）；或骨架缺关键分支，照着重写会漏掉错误处理。"
+    },
+    "gotcha": {
+      "definition": "坑：看起来对但会出错的点，或必须知道的隐含前提。这是最容易被忽略、也最有价值的一类。",
+      "positive": "jitless：clamp 必须在 jitter 之前，否则上限会被 jitter 突破；以及 sleep 必须可被取消，否则关闭时最长等一个退避周期。",
+      "negative": "写「注意异常处理」这类放之四海皆准的空话（不是坑，是常识）。"
+    },
+    "decision": {
+      "definition": "取舍：选择了 A 而非 B，以及为什么。帮助后来者判断该不该照搬。",
+      "positive": "用「上限截断的指数退避」而非「固定间隔」：因为上游限流是突发型的，固定间隔在恢复后仍会撞限流；代价是平均等待更长。",
+      "negative": "只写「用了指数退避」不加理由（那是 mechanism，不是 decision）。"
+    }
+  }
+}
+'''
+SCHEMA: dict[str, Any] = json.loads(_RAW)
