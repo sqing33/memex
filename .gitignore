@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# memex runtime state (never commit a user's local knowledge base)
+*.db
+*.db-wal
+*.db-shm
+.memex/
+repos/
