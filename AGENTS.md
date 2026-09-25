@@ -28,11 +28,16 @@
 
 ## 二、当前阶段（重要）
 
-**方案与契约已定稿；`src/` 尚未开工。**
+**方案与契约已定稿；V1 垂直切片已落地。**
 
+- 代码走「**完整契约 + 垂直切片**」：设计保持完整形态，先实现 V1 —— 一条端到端闭环
+  （`fetch → evidence → begin → validate → commit → search`），17 个 MCP 工具全部可用，
+  用一个真实仓库 + 真实 agent 验证「agent 驱动到底可不可行」。`src/` 见 [`src/README.md`](src/README.md)。
 - 28 项空缺已定 24 项，只剩 **G23–G26 四项全部待实测**（质量阈值 / 聚类阈值 /
   rerank 选型 / 远程会话清扫）——**现在拍数字必然是错的**，必须等真实分布与真模型。
 - 因此：**改动契约前先改文档**。`docs/` 与代码不一致时，以 docs 为准并修代码。
+- 校验顺序 V1–V5 是**验证切片**（不是降级阶梯）：V1 单仓闭环 → V2 3–5 跨语言仓库 →
+  V3 跨语言召回 top-k → V4 聚类质量 → V5 规模化 / 去重 / 站点 / 批量。
 
 ---
 
@@ -96,15 +101,21 @@
 - **目录**（见 `docs/tech-design.md` §3.1）：
   ```
   src/memex/
+    __init__.py · __main__.py · core.py · cli.py · constants.py · fsutil.py ·
+    limits.py · embeddings.py
     cli.py           子命令：init / serve-mcp / serve-http / reindex / migrate /
                      export-site / stats / forget-repo / import-vibecraft
-    store/           db.py(DDL+迁移) · search.py(RRF + kind 先验 + rerank)
+    store/           db.py(DDL+迁移) · analysis.py · index.py · search.py(RRF + kind 先验 + rerank)
     fetch/           抓取、镜像重写、仓库身份解析、bundle 下发与上传
-    analyze/         证据包、切片、校验
+    evidence/        证据包、切片、符号提取
+    contract/        报告 schema + 校验器 + 契约下发
+    analyze/         提交路径：render / rows / commit
     patterns/        跨仓聚类 + pattern chunk 合成
     session/         会话状态机 + session_stats 归档
-    mcp/             17 个工具的 handler（能力声明只含 tools）
+    mcp/             17 个工具的 handler + stdio/HTTP 服务端 + help（能力声明只含 tools）
+    batch/           服务端 LLM 批量分析（V5）
     import_/         VibeCraft 回填（目录名带下划线避开关键字）
+    site/            export-site 的模板与渲染
   ```
 - **零假成功**：抓不到、切不出、模型不可用，一律**显式报错**，不静默降级。
   嵌入模型不可用 → `serve-mcp`/`serve-http` **拒绝启动**，给三条出路

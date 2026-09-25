@@ -22,7 +22,7 @@ Vannevar Bush 1945 年在 *As We May Think* 里描述的 Memex，是「个人知
 ```
 memex/
   docs/          方案与技术设计（md）
-  src/           代码（待写）
+  src/           代码（V1 垂直切片已落地，见 src/README.md）
 ```
 
 | 文件 | 内容 |
@@ -35,7 +35,7 @@ memex/
 | `docs/report.schema.json` | **报告契约（机器可读）**：JSON Schema draft 2020-12，`memex/report/1`（G3 已定） |
 | `docs/report-contract.md` | **报告契约（散文）**：4 个 H2 骨架、五原理轴、卡片五类正反例、中英分层语言规则（G13 已定） |
 | `docs/operations.md` | **运维与配置**：环境变量、忽略规则、子命令、启动检查、危险操作、故障处置（G 组第 2–3 批） |
-| `src/README.md` | 预定模块划分与 `recall/` 复用关系（技术设计定稿前不放代码） |
+| `src/README.md` | 模块划分、`recall/` 复用关系与测试命令（V1 垂直切片已落地） |
 
 > `decisions.md` 记「已定 + 理由」，`gaps.md` 记「未定 + 建议」——两份互补。
 > **28 项空缺已定 24 项**：第 1 批（G1/G2/G3/G13/G19）、第 2 批（G4–G9/G11/G15–G17/G20/G21/G28）、
