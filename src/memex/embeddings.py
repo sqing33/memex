@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import struct
 import urllib.request
 from dataclasses import dataclass
@@ -73,8 +74,28 @@ def hash_embedder(dim: int = HASH_DIM) -> Embedder:
     )
 
 
+def _sanitize_no_proxy_env() -> None:
+    """清理 no_proxy/NO_PROXY 中 httpx 无法解析的条目（如带方括号的 IPv6 `[::1]`）。
+
+    背景：huggingface_hub 用 httpx 建客户端时会解析 no_proxy；`[::1]` 这种带方括号的
+    IPv6 会让 httpx 抛 InvalidURL("Invalid port: ':1]'")，进而导致本地嵌入模型加载失败。
+    这里只剔除无法解析的条目，保留 127.0.0.1/localhost 等有效项。
+    """
+    for key in ("no_proxy", "NO_PROXY"):
+        raw = os.environ.get(key)
+        if not raw:
+            continue
+        kept = [
+            t
+            for t in (item.strip() for item in raw.split(","))
+            if t and "[" not in t and "]" not in t
+        ]
+        os.environ[key] = ",".join(kept)
+
+
 def _st_embedder(model_name: str) -> Embedder:
     """sentence-transformers 后端（可选依赖）。未安装 -> MemexError。"""
+    _sanitize_no_proxy_env()
     try:
         from sentence_transformers import SentenceTransformer  # type: ignore
     except Exception as exc:  # pragma: no cover - 环境相关
