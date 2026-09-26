@@ -644,6 +644,21 @@ claude mcp add --transport http memex https://memex.example.com/mcp \
 不要在请求路径上下载。若服务器 CPU 弱、要更强的多语效果，就切 `MEMEX_EMBEDDER=http:<url>`
 打到一台专门的 embedding 服务（§1.4），把重活分离出去。
 
+#### 仓库元数据的来源边界
+
+抓取只做 clone，**不打 host 元数据 API**（`stars` / `license` / `description` 因此恒空，站点上就显示为破折号——这是**如实留空**而不是丢数据；非 GitHub 宿主同样如此，G6）。
+
+**唯一例外是主语言**：它不需要网络，只要数一下克隆目录里的文件后缀就能得到，而站点目录页与 `list_repos` 的 `language` 过滤都靠它。判定规则（`fetch.detect.detect_language`）：
+
+| 步骤 | 规则 |
+|---|---|
+| 取样范围 | 递归遍历克隆目录，跳过 `.git`、构建产物与常见 vendored 目录 |
+| 计数口径 | 按**后缀**归类到语言，只统计占比 ≥ 1% 的语言 |
+| 定案 | 取文件数最多的语言；平局按语言名字典序，保证同一仓每次结果一致 |
+| 空仓 / 全部被跳过 | 留 `NULL`（**不猜**） |
+
+刻意**不做**的事：不引入语言猜测第三方库、不联网查询、不把 `stars` 之类外部事实一并伪造——「能本地算的才算，不能算的如实留空」。
+
 ### 4.6.1 并发形态：一个共享连接 + serialized SQLite（G26 实测）
 
 远程形态用 `ThreadingHTTPServer`：**每请求一个线程，但共用同一个进程、同一个 `Runtime`（因而共用同一个 SQLite 连接）**。

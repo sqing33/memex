@@ -18,6 +18,7 @@ from typing import Any
 from ..core import Config, MemexError, Paths, RepoRef, parse_repo_url
 from ..fsutil import sha256_file
 from ..store.db import json_dumps, json_loads, utcnow
+from .detect import detect_language
 from . import gitutil
 
 # 克隆并发闸（G7：max 3）。stdio 单进程即可生效；serve-http 由线程共享。
@@ -82,9 +83,13 @@ def _upsert_repo(
     subpath: str | None,
     is_stale: bool,
     is_local: bool,
+    language: str | None,
     aliases: list[str] | None = None,
 ) -> None:
-    """写入或更新 repos 行。已存在的 aliases / fork_of 等保留（增量覆盖）。"""
+    """写入或更新 repos 行。
+    已存在的 aliases_json / fork_of / is_fork **不在** UPDATE 列表里，故被保留；
+    language 每次按克隆目录重新统计（换 embedder 或 reindex 后仍与真实内容一致）。
+    """
     existing = conn.execute("SELECT aliases_json FROM repos WHERE repo_id = ?", (repo_id,)).fetchone()
     aliases_json = json_dumps(aliases if aliases is not None else json_loads(
         existing["aliases_json"] if existing else None, []))
@@ -92,15 +97,15 @@ def _upsert_repo(
         "INSERT INTO repos(repo_id, full_name, url, host, default_branch, language, stars, license, "
         "description, subpath, identity_key, aliases_json, fork_of, is_fork, source, is_stale, "
         "head_sha, cloned_at, repo_path, is_local) "
-        "VALUES(?,?,?,?,?,NULL,NULL,NULL,NULL,?,?,?,NULL,0,?,?,?,?,?,?) "
+        "VALUES(?,?,?,?,?,?,NULL,NULL,NULL,?,?,?,NULL,0,?,?,?,?,?,?) "
         "ON CONFLICT(repo_id) DO UPDATE SET "
         "full_name=excluded.full_name, url=excluded.url, host=excluded.host, "
-        "default_branch=excluded.default_branch, subpath=excluded.subpath, "
-        "identity_key=excluded.identity_key, source=excluded.source, "
+        "default_branch=excluded.default_branch, subpath=excluded.subpath, " 
+        "language=excluded.language, identity_key=excluded.identity_key, source=excluded.source, " 
         "is_stale=excluded.is_stale, head_sha=excluded.head_sha, "
         "cloned_at=excluded.cloned_at, repo_path=excluded.repo_path, aliases_json=excluded.aliases_json",
         (
-            repo_id, full_name, url, host, default_branch, subpath, identity_key,
+            repo_id, full_name, url, host, default_branch, language, subpath, identity_key,
             aliases_json, source, int(is_stale), head_sha, utcnow(), repo_path, int(is_local),
         ),
     )
@@ -159,6 +164,7 @@ def ensure_repo(
             default_branch=result.default_branch,
             subpath=subpath,
             is_stale=stale or bool(existing and existing.get("is_stale")),
+            language=detect_language(result.repo_path),
             is_local=False,
         )
         row = get_repo(conn, repo_id)
@@ -247,6 +253,7 @@ def upload_repo_bundle(
             default_branch=result.default_branch,
             subpath=subpath,
             is_stale=False,
+            language=detect_language(result.repo_path),
             is_local=False,
         )
         row = get_repo(conn, repo_id)

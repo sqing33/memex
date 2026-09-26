@@ -188,6 +188,25 @@ git clone https://$TOKEN@github.com/me/private.git
 
 排查任何 `reindex` 后的计数异常，先查 `SELECT status, COUNT(*) FROM analyses GROUP BY status`——看它有没有覆盖你库里的全部状态值。
 
+### 5.2 站点 / list_repos 上语言是空的
+
+`repos.language` 由**克隆目录的文件后缀统计**得出（见 tech-design §4.6.1），所以它不会为空，除非那个仓库确实没有可识别的源文件（空仓、纯文档仓、深度跳过 vendored 目录）。
+
+| 现象 | 排查 |
+|---|---|
+| `list_repos` 的 `language` 是 `NULL` | 该仓源文件全部落在跳过目录里，或仓库是空仓 |
+| `stars` / `license` / `description` 是 `NULL` | **不是 bug**：V1 不打元数据 API，这三项一律如实留空 |
+
+手工核对某个仓的真实主语言：
+
+``bash
+MEMEX_HOME=... .venv/bin/python -c "
+import sys; sys.path.insert(0,'src');
+from memex.fetch.detect import detect_language;
+print(detect_language('/root/.memex/repos/github.com__tokio-rs__axum'))
+"
+``
+
 ## 6. 常见故障与处置
 
 | 现象 | 原因 | 处置 |
