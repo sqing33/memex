@@ -35,7 +35,8 @@ _ANALYZE_FLOW = """## 一次分析怎么做（agent 驱动）
     必要时用 `read_file_slice` 按需取真实字节。**别整文件塞**。
 5.  **写报告**：挑出 >=3 个功能，每个功能填五轴原理 + >=1 张卡片；`mechanism_desc` 与
     `intent` 必须写英文，`summary`/`title`/原理轴用母语。
-6.  **自查**：`validate_report`（只读、幂等、可无限次调用）。`is_valid=false` 时 `ok` 仍为
+6.  **自查**：`validate_report`（幂等、可无限次调用；知识库只读）。**带上 `session_id`**——
+    `is_valid=true` 时它会把会话推进到 `validated`，第 7 步才能提交。`is_valid=false` 时 `ok` 仍为
     `true`——「校验器工作了」和「报告通过了」是两件事。
 7.  **落库**：`commit_report`。硬门禁：`code_mismatch` 必须为 0；同幂等键内容一致是 no-op；
     内容不同需 `force:true`。落库后自动建 chunk、算向量、跑聚类（`min_repos=2`）。

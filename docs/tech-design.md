@@ -170,6 +170,14 @@ $MEMEX_HOME/                    （默认 ~/.memex）
 **`session_stats` 例外**：它不是真源也不是索引，而是**不可复得的过程数据**（V1 判「agent 驱动
 可不可行」的唯一依据），因此**既不参与 reindex 也不随会话回收而删**（G18）。
 
+**块文本的组成（V1 实测修正，Doraemon 验收得出）**：`chunks.text` 同时喂 FTS5 与向量通道，
+所以它就是「这张卡能被怎样找到」的声明。实测发现只写 `mechanism_desc + title` 时，
+**工程师最常查的东西根本查不到**：卡片块里 0 处出现源码路径，而只是把渲染后的 Markdown
+整段塞进索引的 `report_section` 块反倒 3 处命中——检索返回的是目录噪声，不是解释代码的那张卡。
+因此 card 块的文本固定按 `mechanism_desc → summary → title → tags → 证据(path:symbol) →
+代码符号与标识符` 顺序拼接，**源码路径、符号名、tag 一律进 FTS**；feature 块同理带上
+所属卡的标题。向量通道以 `mechanism_desc` 为主干（英文、语言无关），后缀只增不改语义。
+
 ### 2.3 相对 recall 的改动
 
 1. **卡片代码从单区间 → `code_spans_json` 多段列表**（A1）。校验从「切一次」变成「切 N 次」，

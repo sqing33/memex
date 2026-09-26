@@ -47,7 +47,7 @@ ANALYSIS_CHECKLIST: list[str] = [
     "为每个功能写 >=1 张卡；snippet/skeleton 必须带真实 code_spans（服务端会用真实文件重切，逐字比对，不一致即 code_mismatch）。",
     "所有 evidence 的 path 必须是仓库里真实存在的文件，行号必须在文件行数范围内。",
     "mechanism_desc 与 intent 必须写英文；summary / 原理轴 / title 用你的母语。",
-    "先调 validate_report 自查；is_valid=true 后再调 commit_report。",
+    "带 session_id 调 validate_report 自查；is_valid=true 会把会话推进到 validated，再调 commit_report 落库。",
 ]
 
 

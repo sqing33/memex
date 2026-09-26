@@ -129,7 +129,14 @@ _TOOLS: dict[str, dict[str, Any]] = {
     "validate_report": {
         "category": "read",
         "annotations": _ann("Validate report", True, False, True, False),
-        "input": {"report": {"type": "object"}, "repo_id": _REPO_ID},
+        "input": {
+            "report": {"type": "object"},
+            "repo_id": _REPO_ID,
+            "session_id": {
+                "type": "string",
+                "description": "可选；给了且 is_valid=true 时把会话推进到 validated，解锁 commit_report",
+            },
+        },
         "required": ["report"],
         "payload": {
             "is_valid": {"type": "boolean"}, "problems": {"type": "array"},
@@ -360,7 +367,7 @@ _DESCRIPTIONS: dict[str, str] = {
     "read_file_slice": "Read an exact byte range from a file in a cloned repo (never dump whole files).",
     "request_repo_bundle": "Pack the clone into a single git bundle for remote download (remote form).",
     "begin_analysis": "Open an analysis session; returns session_id + evidence pack + contract + checklist.",
-    "validate_report": "Pure, read-only, idempotent report validation (self-check before commit).",
+    "validate_report": "Idempotent report self-check (read-only vs the knowledge base; with session_id it also advances the session to validated so commit_report can run).",
     "commit_report": "The only write path: full validation, then persist + index (code_mismatch must be 0).",
     "search_implementations": "Cross-repo semantic recall by functional intent (3-channel RRF).",
     "get_card": "Fetch a single card with its real code slices and evidence chain.",

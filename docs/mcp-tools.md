@@ -23,7 +23,7 @@
 | T3 | `read_file_slice` | 机械 | 按需取真实字节（**别整文件塞**） |
 | T4 | `request_repo_bundle` | 机械 | **仅远程形态**：把克隆打成 `git bundle` 单文件下发 |
 | T5 | `begin_analysis` | 写入 | 开会话，返回 `session_id` + 证据包 + 契约 + 清单 + `next_step` |
-| T6 | `validate_report` | 写入 | **纯校验、只读、幂等** —— agent 提交前自查 |
+| T6 | `validate_report` | 写入 | **只读校验 + 会话推进** —— agent 提交前自查，带 `session_id` 时解锁 `commit_report` |
 | T7 | `commit_report` | 写入 | **唯一落库口**，全量校验，失败返回**全部**问题 |
 | T8 | `search_implementations` | 召回 | **主入口**：按功能意图跨仓召回 |
 | T9 | `get_card` | 召回 | 取单张卡片全文（含真实代码切片与证据链） |
@@ -533,8 +533,9 @@ stdio 本地形态下调用它也允许（返回本地文件 `file://` 路径或
 
 ### T6 · `validate_report` — 纯校验（只读、幂等）
 
-**用途**：agent 提交前自查。**不落库、不改状态、可无限次调用**。
-**annotations**：`{"title":"Validate report","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`
+**用途**：agent 提交前自查。**不落库（不写 analyses/features/cards/evidence）、可无限次调用**。
+唯一的写动作是**会话状态推进**：带上 `session_id` 且 `is_valid=true` 时，把会话从 `begun/evidence_taken` 推到 `drafting` 再到 `validated`，好让第 5 步 `commit_report` 通过状态机。不带 `session_id` 就是纯粹的一次性只读校验，幂等、可反复调。
+**annotations**：`{"title":"Validate report","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`（readOnlyHint 指知识库不变；会话记账不算落库）
 
 **入参**
 ```json
@@ -544,7 +545,8 @@ stdio 本地形态下调用它也允许（返回本地文件 `file://` 路径或
   "required": ["report"],
   "properties": {
     "report":  { "type": "object", "description": "memex/report/1 契约对象" },
-    "repo_id": { "$ref": "#/$defs/RepoId", "description": "给了才能校验证据路径是否真实存在" }
+    "repo_id": { "$ref": "#/$defs/RepoId", "description": "给了才能校验证据路径是否真实存在" },
+    "session_id": { "type": "string", "description": "可选；给了且 is_valid=true 时把会话推进到 drafting→validated（唯一会改变会话状态的情况）" }
   }
 }
 ```
@@ -1242,7 +1244,7 @@ server 登记，**server 因此不必出网、也不必持私有仓凭据**（G2
 3  begin_analysis        {repo_id, depth}           → {session_id, evidence_pack, contract, checklist,
                                                         next_step:{action:"validate_report"}}
    ── agent 读克隆（本地）或 request_repo_bundle（远程），自己分析、写报告 ──
-4  validate_report       {report, repo_id}          → {is_valid, problems[]}
+4  validate_report       {report, repo_id, session_id} → {is_valid, problems[]}
    ↺ 若有 problems，agent 修 report 再来（只读幂等，可反复）
 5  commit_report         {session_id, report}       → {is_committed, analysis_id, counts, quality}
 ```
