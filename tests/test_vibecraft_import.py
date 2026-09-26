@@ -247,3 +247,157 @@ def test_vibecraft_import_does_not_duplicate_repo_row(tmp_path: Path) -> None:
 
 def _rows_count(conn: sqlite3.Connection, sql: str) -> int:
     return int(conn.execute(sql).fetchone()[0])
+
+def _make_two_repo_source_db(path: Path, repos: list[tuple[str, str, str]]) -> None:
+    """造一个含两个仓的 VibeCraft 源库。
+
+    聚类语义过滤要求 MIN_REPOS=2（跨 source_group 才留），所以只造一个仓的话
+    无论聚类有没有跑，patterns 恒为 0 —— 测不出「回填建没建模式」。两个仓里
+    放几乎同文的一句 mechanism_desc，是跨仓同机制的最小可信样本。
+    """
+    conn = sqlite3.connect(str(path))
+    conn.executescript(
+        """
+        CREATE TABLE repo_sources (
+            repo_key TEXT PRIMARY KEY, full_name TEXT, url TEXT,
+            clone_path TEXT, language TEXT
+        );
+        CREATE TABLE repo_analysis_results (
+            repo_key TEXT, analysis_id TEXT, status TEXT, commit_sha TEXT
+        );
+        CREATE TABLE repo_knowledge_cards (
+            id TEXT PRIMARY KEY, repo_key TEXT, analysis_id TEXT,
+            card_type TEXT, title TEXT, summary TEXT, mechanism_desc TEXT,
+            intent TEXT, feature_key TEXT
+        );
+        CREATE TABLE repo_knowledge_evidence (
+            card_id TEXT, path TEXT, start_line INTEGER, end_line INTEGER
+        );
+        """
+    )
+    for idx, (repo_key, full_name, root) in enumerate(repos):
+        conn.execute(
+            "INSERT INTO repo_sources VALUES(?,?,?,?,?)",
+            (repo_key, full_name, "https://github.com/" + full_name, root, "go"),
+        )
+        conn.execute(
+            "INSERT INTO repo_analysis_results VALUES(?,?,?,?)",
+            (repo_key, "an-" + str(idx), "ok", "sha" + str(idx)),
+        )
+        # 三个功能才够回填（vibecraft 要求 >=3 features），其中 retry-loop 两个仓
+        # 都有且文案几乎相同 —— 这是唯一该被聚成跨仓模式的那一对。
+        for fkey, title, summary, mech in (
+            (
+                "retry-loop",
+                "退避重试后仍然失败就放弃",
+                "按指数退避重试，次数用尽后向上抛错。",
+                "The call site retries a failed remote request with bounded "
+                "exponential backoff and only gives up after the final "
+                "attempt has also failed on the server side.",
+            ),
+            (
+                "conn-pool",
+                "连接归还前先确认读取结束",
+                "归还前先确认没有未完成的读取。",
+                "The pool hands a connection back to the reuse list only after "
+                "the pending read has completed, so a half drained socket is "
+                "never passed to the next caller.",
+            ),
+            (
+                "disk-cache",
+                "磁盘缓存先记账后落文件",
+                "先写日志再落数据，崩溃后可重放。",
+                "The disk cache writes a journal entry before the payload is "
+                "flushed, so a crash between the two steps can be replayed on "
+                "the next open instead of leaving a torn entry behind.",
+            ),
+        ):
+            cid = "c-%d-%s" % (idx, fkey)
+            conn.execute(
+                "INSERT INTO repo_knowledge_cards VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    cid, repo_key, "an-" + str(idx), "snippet",
+                    title, summary, mech,
+                    "I want a reusable mechanism from another repository.",
+                    fkey,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO repo_knowledge_evidence VALUES(?,?,?,?)",
+                (cid, "client.go", 1, 2),
+            )
+    conn.commit()
+    conn.close()
+
+
+def _setup_two_repos(tmp_path: Path) -> tuple[Paths, Path]:
+    repos = []
+    for key, full in (("demo/alpha", "demo/alpha"), ("demo/beta", "demo/beta")):
+        root = tmp_path / key.split("/")[1]
+        root.mkdir()
+        for fn in ('client.go', 'pool.go', 'cache.go'):
+            (root / fn).write_text(
+                'func Call() error {\n\treturn nil\n}\n', encoding='utf-8')
+        repos.append((key, full, str(root)))
+    src_db = tmp_path / "vibecraft2.db"
+    _make_two_repo_source_db(src_db, repos)
+    home = tmp_path / "home2"
+    home.mkdir()
+    return Paths(home=home), src_db
+
+
+def test_vibecraft_import_builds_patterns_not_only_chunks(tmp_path: Path) -> None:
+    """P1-5：回填同一次调用里必须**同时**建块和建模式。
+
+    此前 grep recluster 在 vibecraft 里零命中：块建了、模式一个不生成。
+    operations.md 已经写着「回填时同一次调用就把索引建好，不必再手动 reindex」，
+    于是能力缺了一半却不报错 —— 用户看 list_patterns 返回空只能自己猜。
+    """
+    paths, src_db = _setup_two_repos(tmp_path)
+    cfg = Config.from_env()
+    cfg.embedder = "hash:64"
+    res = vibecraft.import_vibecraft(paths=paths, cfg=cfg, path=str(src_db))
+
+    assert res["indexed_analyses"] == 2, "两个仓都应建好索引"
+    n_pat = _rows(paths, "SELECT COUNT(*) AS n FROM patterns")[0][0]
+    assert n_pat >= 1, (
+        "回填后 patterns 表为空：模式没建，list_patterns 对回填内容永远返回空"
+    )
+    assert res["patterns"] == n_pat, (
+        "返回体 patterns 与实际落库数不符：报 " + str(res["patterns"])
+        + "，库里 " + str(n_pat)
+    )
+    assert res["cluster"] is not None, (
+        "返回体应带聚类统计（cluster），而不是只报一个数")
+    # 模式也要有块，否则 search 召不回模式本身（G14）
+    pat_chunks = _rows(
+        paths, "SELECT COUNT(*) AS n FROM chunks WHERE kind = 'pattern'"
+    )[0][0]
+    assert pat_chunks >= 1, "模式没有块：search 召不回 pattern 本身"
+
+
+def test_vibecraft_import_reports_cluster_failure_instead_of_silence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """聚类失败**不回滚回填**（派生层），但必须进 warnings —— 静默吞掉才是 bug。"""
+    # 打的是「代码真正解析的那个符号」：回填里写的是 from ..patterns import recluster，
+    # 那是**调用时**去读 memex.patterns 包的属性，所以必须打在包上而不是 cluster 子模块。
+    import memex.patterns as patterns_pkg
+
+    def boom(*_a: object, **_k: object) -> dict[str, object]:
+        raise RuntimeError("意一爆弹的聚类")
+
+    monkeypatch.setattr(patterns_pkg, "recluster", boom)
+
+    paths, src_db = _setup_two_repos(tmp_path)
+    cfg = Config.from_env()
+    cfg.embedder = "hash:64"
+    res = vibecraft.import_vibecraft(paths=paths, cfg=cfg, path=str(src_db))
+
+    assert res["indexed_analyses"] == 2, "聚类失败不该回滚已建好的索引"
+    assert res["patterns"] == 0, (
+        "聚类失败时 patterns 必须如实报 0，不能报上一轮的数")
+    warns = " ".join(res.get("warnings") or [])
+    assert "聚类失败" in warns, (
+        "聚类失败必须显式进 warnings，实际： " + repr(res.get("warnings")))
+    assert _rows(paths, "SELECT COUNT(*) AS n FROM analyses")[0][0] == 2, "真源层不该动"

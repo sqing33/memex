@@ -401,7 +401,7 @@ VibeCraft 的库格式已实地核对（读其 `backend/internal/store/` 与 `se
 
 **索引层覆盖范围**：`reindex` 清空三张派生表后按 `analyses.status` 逐条重建，故筛选里同时保留 `committed` 与 `ready`（后者是历史遗留，老库里可能还有），否则回填索引会被物理删除且永不重建。
 
-**回填自带索引**：`import-vibecraft` 在写完块之后**同一次调用里就地建索引**（`index_analysis` + `set_chunk_repo`），返回体报 `indexed_analyses`。原因：回填内容里机制描述非英文的卡片会落成 `reindex_state='pending'` 且**不建块**（见下文 reindex_state 约定），把建索引外包给用户手动 `reindex` 等于把可见性交给对方；索引是派生层，建失败只记 warning 不影响回填本体，用户仍可用 `reindex` 补建。
+**回填自带索引与模式**：`import-vibecraft` 在写完块之后**同一次调用里就地建索引**（`index_analysis` + `set_chunk_repo`），返回体报 `indexed_analyses`。原因：回填内容里机制描述非英文的卡片会落成 `reindex_state='pending'` 且**不建块**（见下文 reindex_state 约定），把建索引外包给用户手动 `reindex` 等于把可见性交给对方；索引是派生层，建失败只记 warning 不影响回填本体，用户仍可用 `reindex` 补建。 建完块后在同一次调用里**重跑跨仓聚类**（`recluster`），返回体报 `patterns`（本次落库的模式数）与 `cluster`（聚类统计）。聚类是派生层，失败只进 `warnings` 不回滚回填——但**不能静默**：否则能力缺一半却不报错，用户看 `list_patterns` 返回空只能自己猜该跑什么命令。
 
 ### P1-3 补记：`pending` 必须由索引层**自己**把住（V5）
 

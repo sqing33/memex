@@ -1108,7 +1108,8 @@ def _import_all_conn(
         })
 
     indexed = 0
-    indexed = 0
+    patterns = 0
+    clustered: dict[str, Any] | None = None
     if not dry_run and pending_writes:
         _ensure_db(paths)
         wconn = db.connect(str(paths.db))
@@ -1142,6 +1143,23 @@ def _import_all_conn(
                         ana["repo_id"] + " 索引构建失败（内容已回填，可用 reindex 补建）："
                         + str(exc)
                     )
+
+            # P1-5：建完块还要聚类。operations.md 已经承诺「回填时同一次调用就把索引建好，
+            # 不必再手动 reindex」——模式却从不生成，用户看 list_patterns 返回空只能自己猜。
+            # 能力缺一半却不报错，正是零假成功要避免的形状。
+            # 聚类是派生层：失败不回滚回填，但必须显式进 warnings 而不是静默吞掉。
+            if indexed:
+                try:
+                    from ..patterns import recluster
+
+                    clustered = recluster(wconn, cfg)
+                    patterns = int((clustered or {}).get("patterns") or 0)
+                except Exception as exc:  # noqa: BLE001 派生层失败不致命
+                    clustered = None
+                    patterns = 0
+                    warnings.append(
+                        "跨仓聚类失败（内容已回填且已建好索引，模式暂不可用）：" + str(exc)
+                    )
         except sqlite3.Error as exc:
             try:
                 wconn.execute("ROLLBACK")
@@ -1170,6 +1188,8 @@ def _import_all_conn(
             else {"action": "reindex", "note": "本次未建索引（多为机制描述非英文），可用 reindex 补建"}
         ),
         "indexed_analyses": indexed,
+        "patterns": patterns,
+        "cluster": clustered,
     }
     if pending_writes and dry_run:
         result["planned_writes"] = len(pending_writes)
