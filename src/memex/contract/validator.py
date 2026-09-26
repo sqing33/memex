@@ -469,6 +469,12 @@ def _counts(report: Any) -> dict[str, Any]:
     n_cards = 0
     n_spans = 0
     n_ev = 0
+    # G23：质量比率全部真算，不写死（写死=把定义锁成常量，将来放宽校验会静默说谎）
+    axes_total = 0
+    axes_filled = 0
+    axes_distinct = 0
+    cards_with_ev = 0
+    cards_reusable = 0
     principle_units: dict[str, int] = {axis: 0 for axis in PRINCIPLE_KEYS}
     for feat in feats:
         if not isinstance(feat, dict):
@@ -476,17 +482,30 @@ def _counts(report: Any) -> dict[str, Any]:
         n_ev += len(feat.get("evidence") or [])
         principles = feat.get("principles")
         if isinstance(principles, dict):
+            sigs: list[str] = []
             for axis in PRINCIPLE_KEYS:
                 val = principles.get(axis)
                 if isinstance(val, dict):
                     val = val.get("detail") or val.get("summary") or ""
-                principle_units[axis] += count_units(_as_str(val))
+                text = _as_str(val)
+                principle_units[axis] += count_units(text)
+                axes_total += 1
+                sig = _axis_signature(text)
+                if sig:
+                    axes_filled += 1
+                    sigs.append(sig)
+            axes_distinct += len(set(sigs))
         for card in feat.get("cards") or []:
             if not isinstance(card, dict):
                 continue
             n_cards += 1
             n_spans += len(card.get("code_spans") or [])
-            n_ev += len(card.get("evidence") or [])
+            card_ev = card.get("evidence") or []
+            n_ev += len(card_ev)
+            if card_ev:
+                cards_with_ev += 1
+            if card.get("reusable"):
+                cards_reusable += 1
     for key in ("characteristics", "cross_feature_risks"):
         for item in report.get(key, []) or []:
             if isinstance(item, dict):
@@ -497,4 +516,8 @@ def _counts(report: Any) -> dict[str, Any]:
         "code_spans": n_spans,
         "evidence_refs": n_ev,
         "principle_units": principle_units,
+        "axis_completeness": axes_filled / axes_total if axes_total else 0.0,
+        "evidence_coverage": cards_with_ev / n_cards if n_cards else 0.0,
+        "axis_diversity": axes_distinct / axes_total if axes_total else 0.0,
+        "reusable_rate": cards_reusable / n_cards if n_cards else 0.0,
     }

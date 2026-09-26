@@ -135,11 +135,16 @@ def commit_report(
         "evidence": len(rows["evidence"]),
         "reusable_cards": sum(1 for c in rows["cards"] if c["reusable"]),
     }
+    # G23：比率一律取校验器的真算值，不在这里写死。写死的指标等于把定义锁成常量，
+    # 将来放宽校验（例如允许某轴留白）时会静默说谎。
     quality = {
-        "code_mismatch": 0,
+        "code_mismatch": vres["counts"]["code_mismatch"],
         "code_checked": vres["counts"]["code_checked"],
-        "axis_completeness": 1.0,
-        "evidence_coverage": 1.0,
+        "axis_completeness": vres["counts"]["axis_completeness"],
+        "evidence_coverage": vres["counts"]["evidence_coverage"],
+        "axis_diversity": vres["counts"]["axis_diversity"],
+        "reusable_rate": vres["counts"]["reusable_rate"],
+        "principle_units_min": min(vres["counts"]["principle_units"].values()),
         "warnings": vres["warnings"],
         "depth": prof.depth,
     }

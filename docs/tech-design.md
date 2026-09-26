@@ -203,7 +203,8 @@ BM25 与 LIKE 命中计数都天然偏好**命中片段更多**的块，所以�
 2. **新增 `pattern_intents` 与模式的非对称分解**（见 §2.5）——不是「聚类出的题」反过来当探针，
    而是把意图探针作为**独立的一等资产**存下来。
 3. **`analyses` 增加 `quality_json`**（5.8 可观测性）：`code_mismatch`（硬门禁）、
-   轴完整度、证据覆盖率、会话 turn/token。
+   轴完整度、证据覆盖率、**轴区分度**、**可借鉴率**（G23）。前两项在提交路径上恒为 1
+   （校验器已拦住空轴与缺证据），保留只为观测；真正有区分度的是后两项。
 4. **`repos` 增加身份四列** `identity_key` / `aliases_json` / `fork_of` / `is_fork`（G10），
    `full_name` 的唯一键**改为 `identity_key`**；聚类按 `source_group = COALESCE(fork_of, identity_key)`
    计 distinct（G10）。

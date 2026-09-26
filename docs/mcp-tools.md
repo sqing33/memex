@@ -656,8 +656,14 @@ stdio 本地形态下调用它也允许（返回本地文件 `file://` 路径或
       "required": ["code_mismatch"],
       "properties": {
         "code_mismatch":      { "type": "integer", "description": "硬门禁：不为 0 则不落库" },
-        "axis_completeness":  { "type": "number" },
-        "evidence_coverage":  { "type": "number" },
+        "axis_completeness":  { "type": "number",
+          "description": "非空非占位轴占比。校验器已拦空轴与占位符，**恒为 1.0**，保留仅为观测" },
+        "evidence_coverage":  { "type": "number",
+          "description": "带证据的卡占比。校验器已拦缺证据，**恒为 1.0**，保留仅为观测" },
+        "axis_diversity":     { "type": "number",
+          "description": "归一化后不同轴文本数 / 轴总数。三轴以上雷同即拒，正常落在 0.2–1.0" },
+        "reusable_rate":      { "type": "number",
+          "description": "可借鉴卡占比。五仓实测唯一有区分度的质量项（PTNexus 0.889，其余 1.0）" },
         "principle_units_min":{ "type": "integer" }
       }
     },
