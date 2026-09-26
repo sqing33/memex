@@ -130,7 +130,7 @@ def test_正常路径下substr不参与投票(tmp_path, monkeypatch):
 def test_keyword返空时substr兜底投票(tmp_path, monkeypatch):
     """模拟 FTS5 失效：keyword 返空，substr 必须能独立把候选捞回来（V3 探针 11 的依据）。"""
     conn = _db(tmp_path)
-    monkeypatch.setattr(S, "_keyword_rank", lambda conn, q, notes=None: [])
+    monkeypatch.setattr(S, "_keyword_rank", lambda conn, q, notes=None, filt=None: [])
 
     real_rrf = S._rrf
     seen: list[list[list[str]]] = []
@@ -151,7 +151,7 @@ def test_keyword返空时substr兜底投票(tmp_path, monkeypatch):
 def test_channels仍如实上报三通道条数(tmp_path, monkeypatch):
     """兜底是投票规则，不是上报规则：channels 必须仍报三通道真实条数。"""
     conn = _db(tmp_path)
-    monkeypatch.setattr(S, "_keyword_rank", lambda conn, q, notes=None: [])
+    monkeypatch.setattr(S, "_keyword_rank", lambda conn, q, notes=None, filt=None: [])
     out = search(conn, hash_embedder(64), SENTENCE, limit=10)
     assert out["channels"]["keyword"] == 0
     assert out["channels"]["substr"] > 0

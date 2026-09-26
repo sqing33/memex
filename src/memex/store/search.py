@@ -48,12 +48,76 @@ _TRIGRAM = 3
 # 所以必须封顶——且封顶这件事要写进 notes，不能让调用方以为全量匹配过了。
 _TEXT_FALLBACK_MAX_TERMS = 48
 
+class _Filter:
+    """检索过滤谓词（repo_id / language / kind）。
 
-def _vector_rank(conn: sqlite3.Connection, embedder: Embedder, query_vec: list[float]) -> list[str]:
-    rows = conn.execute("SELECT chunk_id, vec FROM chunk_vectors WHERE embedder = ?", (embedder.model,)).fetchall()
+    为什么必须有它：过滤谓词属于「哪些块算候选」的一部分，不是「取完再挑」。
+    谓词晚一步（先按全库取 top-50 再在内存里筛），目标仓的块连融合都进不去，
+    调用方拿到的是「这个仓没有」——而其实有。实测见 decisions.md「过滤必须发生在截断之前」。
+    """
+
+    __slots__ = ("repo_id", "language", "kind")
+
+    def __init__(self, repo_id: str | None, language: str | None, kind: str | None) -> None:
+        self.repo_id = repo_id
+        self.language = language
+        self.kind = kind
+
+    @property
+    def active(self) -> bool:
+        return bool(self.repo_id or self.language or self.kind)
+
+    def clause(self, alias: str) -> tuple[str, list[Any]]:
+        """返回 (SQL 片段, 参数)。片段恒以 AND 开头，拼到 WHERE 后面即可。"""
+
+        parts: list[str] = []
+        p = (alias + ".") if alias else ""
+        params: list[Any] = []
+        if self.repo_id:
+            parts.append(f" AND {p}repo_id = ?")
+            params.append(self.repo_id)
+        if self.language:
+            parts.append(f" AND {p}language = ?")
+            params.append(self.language)
+        if self.kind:
+            parts.append(f" AND {p}kind = ?")
+            params.append(self.kind)
+        return "".join(parts), params
+
+    def describe(self) -> str:
+        bits: list[str] = []
+        if self.repo_id:
+            bits.append(f"repo_id={self.repo_id}")
+        if self.language:
+            bits.append(f"language={self.language}")
+        if self.kind:
+            bits.append(f"kind={self.kind}")
+        return "，".join(bits)
+
+
+
+
+def _vector_rank(
+    conn: sqlite3.Connection,
+    embedder: Embedder,
+    query_vec: list[float],
+    filt: _Filter | None = None,
+) -> list[str]:
+    # 谓词下沉：向量通道必须 JOIN chunks 才能按 repo/language/kind 收敛。
+    # 否则先在全库取 top-50 再在内存筛——目标仓的块连候选都进不去，
+    # 调用方拿到的是「这个仓没有」，而其实有（decisions.md「过滤必须发生在截断之前」）。
+    base = (
+        "SELECT cv.chunk_id AS chunk_id, cv.vec AS vec FROM chunk_vectors cv "
+        "JOIN chunks c ON c.chunk_id = cv.chunk_id"
+    )
+    frag, fparams = filt.clause("c") if filt is not None else ("", [])
+    rows = conn.execute(
+        f"{base} WHERE cv.embedder = ?{frag}",
+        [embedder.model, *fparams],
+    ).fetchall()
     if not rows:
         # embedder 标识不一致时退一步：用任意已有向量（读侧容错）
-        rows = conn.execute("SELECT chunk_id, vec FROM chunk_vectors").fetchall()
+        rows = conn.execute(f"{base} WHERE 1=1{frag}", fparams).fetchall()
     scored: list[tuple[float, str]] = []
     for r in rows:
         try:
@@ -63,6 +127,7 @@ def _vector_rank(conn: sqlite3.Connection, embedder: Embedder, query_vec: list[f
         scored.append((cosine(query_vec, v), r["chunk_id"]))
     scored.sort(key=lambda x: (-x[0], x[1]))
     return [cid for _, cid in scored[:_CHANNEL_TOP]]
+
 
 
 def _fts_quote(query: str) -> str:
@@ -99,14 +164,23 @@ def _trigrams(text: str) -> list[str]:
     return out
 
 
-def _keyword_rank(conn: sqlite3.Connection, query: str, notes: list[str] | None = None) -> list[str]:
+def _keyword_rank(
+    conn: sqlite3.Connection,
+    query: str,
+    notes: list[str] | None = None,
+    filt: _Filter | None = None,
+) -> list[str]:
     q = query.strip()
     if len(q) < _TRIGRAM:
         return []
+    # FTS5 的 MATCH 不能直接 JOIN（虚拟表），谓词只能以半连接子查询落进去。
+    frag, fparams = filt.clause("") if filt is not None else ("", [])
+    sub = f" AND chunk_id IN (SELECT chunk_id FROM chunks WHERE 1=1{frag})" if frag else ""
     try:
         rows = conn.execute(
-            "SELECT chunk_id FROM chunk_fts WHERE chunk_fts MATCH ? ORDER BY bm25(chunk_fts) LIMIT ?",
-            (_fts_quote(q), _CHANNEL_TOP),
+            "SELECT chunk_id FROM chunk_fts WHERE chunk_fts MATCH ?"
+            f"{sub} ORDER BY bm25(chunk_fts) LIMIT ?",
+            [_fts_quote(q), *fparams, _CHANNEL_TOP],
         ).fetchall()
     except sqlite3.OperationalError:
         rows = []
@@ -120,8 +194,9 @@ def _keyword_rank(conn: sqlite3.Connection, query: str, notes: list[str] | None 
     expr = " OR ".join(_fts_quote(g) for g in used)
     try:
         rows = conn.execute(
-            "SELECT chunk_id FROM chunk_fts WHERE chunk_fts MATCH ? ORDER BY bm25(chunk_fts) LIMIT ?",
-            (expr, _CHANNEL_TOP),
+            "SELECT chunk_id FROM chunk_fts WHERE chunk_fts MATCH ?"
+            f"{sub} ORDER BY bm25(chunk_fts) LIMIT ?",
+            [expr, *fparams, _CHANNEL_TOP],
         ).fetchall()
     except sqlite3.OperationalError:
         if notes is not None:
@@ -135,13 +210,20 @@ def _keyword_rank(conn: sqlite3.Connection, query: str, notes: list[str] | None 
     return [r["chunk_id"] for r in rows]
 
 
-def _substr_rank(conn: sqlite3.Connection, query: str, notes: list[str] | None = None) -> list[str]:
+
+def _substr_rank(
+    conn: sqlite3.Connection,
+    query: str,
+    notes: list[str] | None = None,
+    filt: _Filter | None = None,
+) -> list[str]:
     q = query.strip()
     if not q:
         return []
+    frag, fparams = filt.clause("") if filt is not None else ("", [])
     rows = conn.execute(
-        "SELECT chunk_id FROM chunks WHERE text LIKE ? ESCAPE '\\' LIMIT ?",
-        (_like_pattern(q), _CHANNEL_TOP),
+        f"SELECT chunk_id FROM chunks WHERE text LIKE ? ESCAPE '\\'{frag} LIMIT ?",
+        [_like_pattern(q), *fparams, _CHANNEL_TOP],
     ).fetchall()
     if rows:
         return [r["chunk_id"] for r in rows]
@@ -150,11 +232,13 @@ def _substr_rank(conn: sqlite3.Connection, query: str, notes: list[str] | None =
     if not grams:
         return []
     used = grams[:_TEXT_FALLBACK_MAX_TERMS]
+    # 括号是必须的：OR 的优先级高于 AND，不括起来谓词只作用于最后一个 trigram，
+    # 前面几条 LIKE 会绕过过滤把别的仓的块放进来（实测：过滤后本该 0 条却返回了命中）。
     where = " OR ".join("text LIKE ? ESCAPE '\\'" for _ in used)
     rows = conn.execute(
-        f"SELECT chunk_id, COUNT(*) AS hits FROM chunks WHERE {where} "
+        f"SELECT chunk_id, COUNT(*) AS hits FROM chunks WHERE ({where}){frag} "
         f"GROUP BY chunk_id ORDER BY hits DESC, chunk_id LIMIT ?",
-        [*(_like_pattern(g) for g in used), _CHANNEL_TOP],
+        [*(_like_pattern(g) for g in used), *fparams, _CHANNEL_TOP],
     ).fetchall()
     if notes is not None:
         note = f"子串通道无整串命中，降级为逐 trigram 命中计数（{len(used)} 个 trigram）"
@@ -162,6 +246,7 @@ def _substr_rank(conn: sqlite3.Connection, query: str, notes: list[str] | None =
             note += f"；查询过长已截断（原文可切 {len(grams)} 个）"
         notes.append(note)
     return [r["chunk_id"] for r in rows]
+
 
 
 
@@ -353,18 +438,21 @@ def search(
     if not q:
         raise MemexError("invalid_argument", "query 不能为空", {})
 
+    # 过滤谓词在取候选之前生效：谓词晚一步，目标仓的块连候选都进不去（见 _Filter）。
+    filt = _Filter(repo_id, language, kind)
+
     named: list[tuple[str, list[str]]] = []
     if embedder is not None:
         try:
             qv = embedder.embed_one(q)
-            named.append(("vector", _vector_rank(conn, embedder, qv)))
+            named.append(("vector", _vector_rank(conn, embedder, qv, filt)))
         except MemexError:
             named.append(("vector", []))
     else:
         named.append(("vector", []))
     notes: list[str] = []
-    named.append(("keyword", _keyword_rank(conn, q, notes)))
-    named.append(("substr", _substr_rank(conn, q, notes)))
+    named.append(("keyword", _keyword_rank(conn, q, notes, filt)))
+    named.append(("substr", _substr_rank(conn, q, notes, filt)))
 
     match_channels: dict[str, set[str]] = {}
     for name, lst in named:
@@ -383,10 +471,13 @@ def search(
         votes.append(named[2][1])
     fused = _rrf(votes, RRF_K)
     if not fused:
+        why = f"过滤后无命中（{filt.describe()}）" if filt.active else "库中无匹配"
         return {"count": 0, "total": 0, "items": [], "channels": channels, "query": q,
-                "notes": [*notes, "库中无匹配"]}
+                "notes": [*notes, why]}
 
     items = _hydrate(conn, fused, match_channels)
+    # 谓词已在 SQL 生效，这里只是防御性复查（_hydrate 读的是 chunks 全行，与谓词同源）。
+    # 留着它是为了：万一将来某条通道绕过了谓词，结果集也不会混进别的仓。
     if repo_id:
         items = [it for it in items if it.get("repo_id") == repo_id]
     if language:
