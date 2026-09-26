@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import subprocess
 import sys
@@ -183,5 +184,71 @@ def test_mcp_end_to_end(tmp_path):
         assert hp["ok"] is True and "mechanism" in hp["markdown"]
         hp2 = _call(srv, "help", {"topic": "nope"}, 16)
         assert hp2["ok"] is False and hp2["error"]["code"] == "invalid_argument"
+    finally:
+        srv.close()
+
+
+
+def test_forget_tools_require_explicit_confirm(tmp_path):
+    """危险工具的 confirm 闸门：缺 confirm / confirm 非 true 一律拒绝，且不删任何东西。
+
+    forget_repo / forget_analysis 是 memex 唯一的破坏性工具（operations.md §5）。
+    闸门若失效，agent 一次误调用就会抹掉整仓知识，因此逐个参数组合都要覆盖。
+    """
+    cfg, _head = _setup(tmp_path)
+    srv = Server(cfg)
+    try:
+        cases = [
+            ("forget_repo", {"repo_id": "github.com__demo__demo"}),
+            ("forget_repo", {"repo_id": "github.com__demo__demo", "confirm": False}),
+            ("forget_repo", {"repo_id": "github.com__demo__demo", "confirm": "true"}),
+            ("forget_repo", {"repo_id": "github.com__demo__demo", "confirm": 1}),
+            ("forget_analysis", {"analysis_id": "ana_x"}),
+            ("forget_analysis", {"analysis_id": "ana_x", "confirm": False}),
+            ("forget_analysis", {"analysis_id": "ana_x", "confirm": "true"}),
+            ("forget_analysis", {"analysis_id": "ana_x", "confirm": 1}),
+        ]
+        for i, (name, args) in enumerate(cases):
+            res = _call(srv, name, args, 100 + i)
+            assert res['ok'] is False, (name, args, res)
+            err = res['error']
+            # 工具默认关闭时是 disabled；放行后必须停在 confirm 闸门
+            assert err['code'] in ('disabled', 'invalid_argument'), (name, args, err)
+            if err['code'] == 'invalid_argument':
+                assert err['details']['param'] == 'confirm', err
+
+        # 一个字节都不能少
+        rec = _call(srv, 'recall_stats', {}, 200)
+        assert rec['ok'] is True, rec
+        assert rec['counts']['repos'] == 1, rec
+    finally:
+        srv.close()
+
+
+def test_forget_analysis_deletes_only_its_analysis(tmp_path):
+    """confirm 合法时 forget_analysis 只删自己那一次分析，同仓另一次分析不受影响。
+
+    这是 delete 的作用域契约：按 analysis_id 精确定位，不按 repo 连带。
+    """
+    cfg, _head = _setup(tmp_path)
+    cfg = dataclasses.replace(cfg, tools=('network', 'read', 'write', 'destructive'))
+    srv = Server(cfg)
+    try:
+        sid = _call(srv, 'begin_analysis', {'repo_id': 'github.com__demo__demo', 'depth': 'standard', 'analyst': 'smoke'}, 300)['session_id']
+        val = _call(srv, 'validate_report', {'report': _report(), 'repo_id': 'github.com__demo__demo', 'session_id': sid}, 301)
+        assert val['is_valid'] is True, val
+        com = _call(srv, 'commit_report', {'session_id': sid, 'report': _report()}, 302)
+        assert com['ok'] is True and com['is_committed'] is True, com
+        aid = com['analysis_id']
+
+        res = _call(srv, 'forget_analysis', {'analysis_id': aid, 'confirm': True}, 303)
+        assert res['ok'] is True, res
+
+        rec = _call(srv, 'recall_stats', {}, 304)
+        assert rec['ok'] is True, rec
+        assert rec['counts']['analyses'] == 0, rec
+        assert rec['counts']['cards'] == 0, rec
+        # 仓库行本身不动：只删分析，不删 repo
+        assert rec['counts']['repos'] == 1, rec
     finally:
         srv.close()
