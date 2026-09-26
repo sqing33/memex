@@ -60,12 +60,44 @@ def build_feature_text(feature: dict[str, Any]) -> str:
 
 
 def build_card_text(card: dict[str, Any]) -> str:
-    """卡片正文：mechanism_desc 为主（英文、语言无关），标题后缀补语境。"""
+    """卡片正文：mechanism_desc 为主干（英文、语言无关），后缀补「怎么找到它」。
+
+    tech-design §2.2「块文本的组成」：源码路径、符号名、tag 一律进块文本，
+    否则 FTS5 命中不到卡片，只能命中把整段 Markdown 塞进索引的 report_section 块，
+    检索就返回目录噪声而不是解释代码的那张卡（Doraemon 验收实测）。
+    """
+    parts: list[str] = []
     mech = (card.get("mechanism_desc") or "").strip()
-    title = (card.get("title") or "").strip()
-    if title and title not in mech:
-        return f"{mech} {title}".strip()
-    return mech or title
+    if mech:
+        parts.append(mech)
+    for key in ("summary", "title"):
+        val = (card.get(key) or "").strip()
+        if val:
+            parts.append(val)
+    tags = [str(t).strip() for t in (card.get("tags") or []) if str(t).strip()]
+    if tags:
+        parts.append(" ".join(tags))
+    # 证据：源码路径 + 符号名，是工程师最常敲的字面量
+    for ev in card.get("evidence") or []:
+        if not isinstance(ev, dict):
+            continue
+        path = str(ev.get("path") or "").strip()
+        if not path:
+            continue
+        symbol = str(ev.get("symbol") or "").strip()
+        parts.append(f"{path} {symbol}".strip())
+    if card.get("symbol"):
+        parts.append(str(card["symbol"]).strip())
+    return " ".join(parts).strip()
+
+
+def _card_evidence(conn: sqlite3.Connection, card_id: str) -> list[dict[str, Any]]:
+    """取卡片的证据（源码路径 + 符号名），供块文本进 FTS（tech-design §2.2）。"""
+    rows = conn.execute(
+        "SELECT path, symbol FROM evidence WHERE card_id = ? ORDER BY evidence_id",
+        (card_id,),
+    ).fetchall()
+    return [{"path": r["path"], "symbol": r["symbol"]} for r in rows]
 
 
 def _write_fts(conn: sqlite3.Connection, chunk_id: str, text: str) -> None:
@@ -140,16 +172,25 @@ def index_analysis(
     rows: list[dict[str, Any]] = []
     ref_ids: list[str] = []
     n_cards = 0
+    # tags 存在 report_json 里（cards 表无 tags 列），按 feature slug + 卡片标题定位
+    report = json_loads(
+        conn.execute("SELECT report_json FROM analyses WHERE analysis_id = ?", (analysis_id,)).fetchone(),
+        {},
+    ) or {}
+    tags_by_title: dict[tuple[str, str], list[str]] = {}
+    for feat in (report.get("features", []) if isinstance(report, dict) else []):
+        slug = feat.get("key")
+        if not isinstance(slug, str):
+            continue
+        for card in feat.get("cards", []) or []:
+            title = card.get("title")
+            if isinstance(title, str):
+                tags_by_title[(slug, title)] = list(card.get("tags") or [])
+
     for f in feats:
         fid = f["feature_id"]
         ref_ids.append(fid)
-        principles = json_loads(
-            conn.execute(
-                "SELECT principles_json FROM feature_principles_dummy" if False else "SELECT 1"
-            ).fetchone() if False else None,
-            {},
-        ) or {}
-        # principles 存在 cards 的父 feature 上没有独立列，改由 feature 摘要派生
+        # principles 没有独立列，改由 feature 摘要派生
         ftext = build_feature_text({"title": f["title"], "summary": f["summary"], "principles": {}})
         rows.append({
             "chunk_id": chunk_id_for("feature", fid),
@@ -166,6 +207,9 @@ def index_analysis(
             "WHERE feature_id = ? ORDER BY card_id",
             (fid,),
         ).fetchall()
+        # feature 块带上所属卡的标题：搜到 feature 时能顺藤摸到具体机制
+        if cards:
+            ftext = ftext + " " + " ".join((c["title"] or "") for c in cards if c["title"])
         for c in cards:
             cid = c["card_id"]
             rows.append({
@@ -173,7 +217,14 @@ def index_analysis(
                 "kind": "card",
                 "ref_id": cid,
                 "card_id": cid,
-                "text": build_card_text({"mechanism_desc": c["mechanism_desc"], "title": c["title"]}),
+                "text": build_card_text({
+                    "mechanism_desc": c["mechanism_desc"],
+                    "summary": c["summary"],
+                    "title": c["title"],
+                    "language": c["language"],
+                    "tags": tags_by_title.get((f["slug"] or "", c["title"] or ""), []),
+                    "evidence": _card_evidence(conn, cid),
+                }),
                 "repo_id": None,
                 "language": c["language"],
                 "heading": c["title"],
