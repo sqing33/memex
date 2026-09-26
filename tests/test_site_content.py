@@ -20,7 +20,7 @@ import sqlite3
 # 种子逻辑悄悄分叉（之前已经踩过一次 identity_key NOT NULL 的坑）。
 from test_site_export import _read, _seed_analysis, _seed_repo, paths  # noqa: F401
 
-from memex.site.render import export_site
+from memex.site.render import _score_line, export_site
 
 
 def _ev(path, start, end, symbol, note):
@@ -354,3 +354,20 @@ def test_repo_pages_link_to_patterns_page(paths, tmp_path):
     html = _read(out / "github.com__o__a.html")
     assert 'href="patterns.html"' in html
     assert 'href="index.html"' in html, "要能回目录页"
+
+
+class Test相似度渲染:
+    """相似度是页面上唯一的数值列，格式不对会直接毁掉可读性。"""
+
+    def test_全精度浮点被压到三位小数(self) -> None:
+        # REAL 列直接 str() 会印出 0.6734730638210827 这种全精度
+        assert _score_line({"score": 0.6734730638210827, "symbol": "X"}) == "相似度 0.673 · X"
+
+    def test_符号为空时不留悬空间隔点(self) -> None:
+        # 模板里写死 `相似度 $score · $symbol` 会在无符号时留下一个光秃秃的「·」
+        line = _score_line({"score": 0.6, "symbol": None})
+        assert line == "相似度 0.600", line
+        assert "·" not in line
+
+    def test_非数值退化成破折号而不是抛异常(self) -> None:
+        assert _score_line({"score": None, "symbol": ""}) == "相似度 —"

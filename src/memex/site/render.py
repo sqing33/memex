@@ -36,6 +36,27 @@ def _dash(value: Any) -> str:
         return _DASH
     return _e(value)
 
+
+def _score_line(member: dict[str, Any]) -> str:
+    """成员脚注：相似度 + 可选符号。两个都要有才用间隔点连。"""
+    parts = ["相似度 " + _score(member.get("score"))]
+    symbol = str(member.get("symbol") or "")
+    if symbol:
+        parts.append(_e(symbol))
+    return " · ".join(parts)
+
+
+def _score(value: Any) -> str:
+    """相似度渲染：三位小数。
+
+    直接把 REAL 列交给 str() 会印出 `0.6734730638210827`——
+    这种全精度浮点在页面上没有任何信息量，只会把两行挤成一样长。
+    """
+    try:
+        return f"{float(value):.3f}"
+    except (TypeError, ValueError):
+        return _DASH
+
 # —— 页面外壳：内联 CSS，无任何外部资源引用（C11）——
 _PAGE = Template(
     """<!DOCTYPE html>
@@ -192,7 +213,7 @@ $members
 
 _PATTERN_MEMBER = Template(
     """<li><a href="$href">$repo</a> <span class="badge">$kind</span> $title
-<div class="note">相似度 $score · $symbol</div>
+<div class="note">$score_line</div>
 <div class="note">$summary</div>
 </li>
 """
@@ -482,8 +503,7 @@ def _render_pattern_page(rows: list[sqlite3.Row]) -> str:
                 repo=_e(m.get("repo_full_name")),
                 kind=_e(_KIND_LABELS.get(kind, kind)),
                 title=_e(m.get("title")),
-                score=_dash(m.get("score")),
-                symbol=_e(m.get("symbol")),
+                score_line=_score_line(m),
                 summary=_e(m.get("summary")),
             ))
         blocks.append(_PATTERN_BLOCK.substitute(
