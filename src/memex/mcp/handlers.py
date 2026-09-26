@@ -776,6 +776,10 @@ def _search_item(rt: Runtime, it: dict[str, Any], detail: str) -> dict[str, Any]
         "title": it.get("heading") or card.get("title"),
         "heading": it.get("heading"),
         "language": it.get("language"),
+        # G21 补记：可能是 None（历史块 / 跨 producer 的 pattern 块）。
+        # 只在**有值**时放进结果——不声明就不出（契约 additionalProperties: false），
+        # 也不给默认值兜底。
+        "producer": it.get("producer"),
         "excerpt": _excerpt(it.get("text")),
         "card_id": it.get("card_id"),
         "ref_id": it.get("ref_id"),
@@ -802,6 +806,9 @@ def _search_item(rt: Runtime, it: dict[str, Any], detail: str) -> dict[str, Any]
             ev = _card_evidence(rt, str(card.get("card_id")))
             if ev:
                 item["source"] = ev[0]
+    if item.get("producer") is None:
+        # 拿不到来源就不给这个键，而不是给个 null 让调用方猜。
+        del item["producer"]
     if detail == "full":
         if card:
             item["evidence"] = _card_evidence(rt, str(card.get("card_id")))

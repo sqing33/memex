@@ -150,7 +150,10 @@ git clone https://$TOKEN@github.com/me/private.git
 1. `MEMEX_HOME` 可读写；不存在则提示 `memex init`。
 2. `meta.schema_version` 与本版常量比对（G9）：
    - 更高 → 拒绝启动，提示升级 memex；
-   - 更低 → 有迁移函数则跑，否则提示 `memex migrate`。
+   - 更低 → **查迁移注册表 `"<库版本>-><代码版本>"` 并逐级自动执行**；
+     缺任一级迁移函数才拒绝启动并提示 `memex migrate`（G9 承诺，本版起真兑现）；
+   - 版本号对得上 ≠ 列齐全 → 再跑一次 `assert_expected_columns()`：
+     缺列 → `conflict` 并列出 `missing_columns`，提示 `memex migrate`（G9 补记）。
 3. `meta.embedder` / `meta.dim` 存在；`chunk_vectors` 中无异构 `embedder` 行
    （若有 → 警告并提示 `memex reindex`，**不阻止启动**，但检索会被拒）。
 4. 嵌入模型：启动检查**不同步加载**真模型——同步加载会阻塞 MCP `initialize` 响应，
@@ -269,5 +272,8 @@ print(detect_language('/root/.memex/repos/github.com__tokio-rs__axum'))
 | 检索报 `conflict`（混模型） | `chunk_vectors` 有异构 embedder | `memex reindex --embedder <当前>`（G11） |
 | `rate_limited` | 触到 QPS / clone / embed 闸 | 按 `details.retry_after_seconds` 等待（G7） |
 | `stale_repo` | 会话期间仓被更新 | 重开会话或让 agent 基于新版本重切（G20） |
+| 启动报 `conflict` + `missing_columns` | 库比代码旧，且没有对应的迁移函数（G9 补记） | `memex migrate`；先 `memex migrate --dry-run` 看它会补哪几列，再执行 |
+| 启动报 `conflict` + `missing_columns`，但 `--dry-run` 显示 `steps: []` | 库里 `schema_version` 已是最新版、列却缺（版本号是人手工维护的） | 版本号是常量、列是代码事实，**以代码为准**：更新到含该列的 memex 再 `memex migrate --dry-run` 确认 |
+| 检索报 `sqlite3.OperationalError: table chunks has no column named ...` | 既有库没跑过迁移 | `memex migrate`（新版本会把这个裸异常兜成可读的 `conflict`，G9 补记） |
 | 启动报 schema 版本不符 | 库比代码新 | 拒绝启动是正确的；升级 memex 或从备份恢复（G9） |
 | 证据包 `truncated: true` | 超 `depth` 上限 | 换更大的 `depth`，或接受截断（已显式标注，G5） |

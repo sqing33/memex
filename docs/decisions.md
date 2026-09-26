@@ -489,6 +489,42 @@ forget_repo(repo_id, confirm: true)           # 级联删其上全部 analysis +
 - **索引层** 不迁移，直接 `reindex`。
 - `cli` 加 `memex migrate [--to X] [--dry-run]`；`--dry-run` 打印将执行的动作。
 
+#### G9 补记：版本号靠人维护，列是代码事实（V5 实测撞出来的）
+
+**起因**：为 G21 跑真库 `reindex` 时崩在 `sqlite3.OperationalError: table chunks has no column named producer`。
+根因不在 G21，在 G9 自己——**上面那条「更低 → 若存在 migrate_<from>_<to>() 则自动迁移」，
+代码里从来没有过这个注册表**，`_COLUMN_MIGRATIONS` 只在 `init_db` / `memex migrate` 里被调用，
+而 `SCHEMA_VERSION` 长期停在 "1"，所以 `check_schema` 看到 `dbn == cn` 直接放行，
+永远不提示要迁移。三层同时失效：
+
+1. **既有库升级没人跑建表路径**——`init` 幂等，只在用户手动敲 `memex migrate` 时才会补列。
+2. **`SCHEMA_VERSION` 从不递增**——additive 列不推版本号，版本比对因此永远「通过」。
+3. **没有列存在性断言**——SQL 直接写 `producer`，缺列就是裸 `OperationalError`，
+   被 `dispatch` 兜成 `internal`，agent 只会重试。
+
+**后果不止是崩**：`repos.merged_into`（G10 写侧）缺列时 `repo_summary` 走 `row.get()`，
+**恒为 None 且零报错**——用户拿到一半成果却以为全拿到了。静默比崩溃更坏。
+
+**决定（三条）**：
+- **版本号真的会动**：加 additive 列必须递增 `SCHEMA_VERSION`，本次 1 → 2；
+  迁移注册表 `_MIGRATIONS`（键 `"1->2"`）就是 G9 原文那个 `migrate_<from>_<to>()` 的真身，
+  `check_schema` 遇「更低」先查注册表，**有就自动迁移**（G9 早就这么承诺了，现在才兑现）。
+- **版本号对得上 ≠ 列齐全**：新增 `assert_expected_columns()` 在启动检查里再兜一层，
+  缺列 → `conflict` + `missing_columns` + 指路 `memex migrate`。
+  版本号是人手工维护的常量，列是代码事实，**以代码为准**。
+- **`--dry-run` 必须打印真正会执行的步骤**：旧实现 `steps` 恒为 `[]`
+  （实测 `{"from":"1","to":"1","steps":[]}`），用户看计划等于没看；现在列出 `create_schema` / `1->2`，
+  执行后回报 `applied_columns`（**哪个版本补了哪几列**）。
+
+**为什么自动迁移不加确认**：这些都是 additive 的 `ALTER TABLE ADD COLUMN`，
+不丢数据、不改语义、可幂等重跑；停在「请手动跑」只会让人一直用着半坏的库。
+真正会改数据形状的迁移仍应走 G9 的「导出真源 → 建新库 → 重灌」。
+
+**踩到的自伤（记下来）**：本轮补丁自己引入过两个 bug，都是「零假成功」的反面——
+(1) `migrate` 在**未初始化**的库上找 `0->1` 迁移函数 → 报「没有 0->1 的迁移函数」，
+建表那一步本身就是 0->1，不该去注册表找；(2) `create_schema` 不返回它补了哪些列 →
+`applied_columns` 谎报 `[]`（真库迁移明明补了 3 列）。**两者都是「报告与事实不符」，
+都由 `tests/test_schema_migration.py` 反证转红后修掉。**
 ### ✔ G11. 嵌入模型迁移与「混模型库」
 
 **决定：`meta.embedder` 是唯一当前索引模型；写入与检索两端都断言，
@@ -570,6 +606,37 @@ forget_repo(repo_id, confirm: true)           # 级联删其上全部 analysis +
   谁好谁坏看不出来。
 - `analyst` 对 batch 记 `batch/<模型名>`（如 `batch/gpt-4o-mini`）。
 - **实施顺序：V1–V4 只用 agent 驱动；batch 排 V5**（与「规模」目标同批，避免过早分心）。
+
+#### G21 写侧补记：`producer` 必须能被检索结果看见，否则分组统计没有对象（V5 P3）
+
+本条决定说「`search_implementations` 结果里带 `producer`，让用户知道这条是机器批量的」，
+但 `chunks` 表**根本没有 producer 列**（`store/db.py:183` 的 DDL 只有
+chunk_id/kind/ref_id/card_id/text/repo_id/language/heading），检索侧也没有任何地方产出它。
+也就是说这条决定在读路径上是**空的**：`recall_stats.quality.by_producer` 分组统计了，
+可没有任何单个结果能回答「这条是 agent 分析的还是 batch 跑的」。
+
+**补记决定：`producer` 走 `chunks` 表加列 + 建块时落值 + 检索结果透出**，而不是运行时 join
+`analyses`。理由是检索的每一行都已经带着 `ref_id`（card/feature/analysis 三种），运行时要
+为每行多查一次 `analyses` 才能拿到 producer；落成列后是零成本，且**索引层与真源层的对应关系
+是建块时就确定的事实**（卡从哪次分析来，建块那一刻就定了），事后 join 反而要处理
+「ref 已删」的情况——而那正是孤儿块问题（同 §5.3）。
+
+- `chunks.producer TEXT`：**可为空**。历史块（换模型前建的、以及无法判定来源的）
+  一律留 NULL 而不是补一个默认值——「把『不知道』写成『agent』」是假信号。
+- `pattern` 块的 producer 由成员**投票**决定：取成员卡 producer 的多数值；
+  平票或成员全为 NULL 时留 NULL（pattern 本来就跨仓跨 producer，单值是简写不是事实）。
+- 检索结果 `results[].producer` **可能为 null**（历史块 / 跨 producer 的 pattern），
+  契约里就是 `["string","null"]`，**不给默认值**。
+
+**`analyze_repo` 在 V5 的形态**：batch 直跑要自带一次 LLM 调用，server 端没有配置
+LLM 凭据、没有提示词版本管理、没有成本上限。按 AGENTS.md 第一原则
+「机械活留在 server，判断力交给 agent」，服务端 LLM 批量分析**正是把判断力搬回 server**——
+所以本轮决定**不实现** `analyze_repo`：现有的 `raise MemexError("unsupported")` 是**正确的**，
+它让能力探测（`details.planned="V5"`）如实告诉调用方这条路没有，而不是给一个跑不通的半成品。
+真要做，正确的形态是 `MEMEX_BATCH_LLM` 显式配置 + 每次调用记 `analyst=batch/<模型名>` +
+独立成本上限开关，且默认**关**。
+
+---
 
 ### ✔ G28. 危险工具禁用清单
 

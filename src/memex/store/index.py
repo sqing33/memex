@@ -149,8 +149,8 @@ def put_chunks(conn: sqlite3.Connection, embedder: Embedder, rows: list[dict[str
     dim = embedder.dim
     for row, vec in zip(rows, vectors):
         conn.execute(
-            "INSERT INTO chunks(chunk_id, kind, ref_id, card_id, text, repo_id, language, heading) "
-            "VALUES(?,?,?,?,?,?,?,?)",
+            "INSERT INTO chunks(chunk_id, kind, ref_id, card_id, text, repo_id, language, heading, producer) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
             (
                 row["chunk_id"],
                 row["kind"],
@@ -160,6 +160,7 @@ def put_chunks(conn: sqlite3.Connection, embedder: Embedder, rows: list[dict[str
                 row.get("repo_id"),
                 row.get("language"),
                 row.get("heading"),
+                row.get("producer"),
             ),
         )
         conn.execute(
@@ -187,10 +188,14 @@ def index_analysis(
     n_cards = 0
     n_pending = 0
     # tags 存在 report_json 里（cards 表无 tags 列），按 feature slug + 卡片标题定位
-    report = json_loads(
-        conn.execute("SELECT report_json FROM analyses WHERE analysis_id = ?", (analysis_id,)).fetchone(),
-        {},
-    ) or {}
+    # G21 补记：producer 在**建块这一刻**定死，不做运行时 join analyses——检索每行本来
+    # 就带着 ref_id，运行时 join 要多查一次，还会撞上「ref 已删」的孤儿块（见 db.py 的
+    # _drop_repo_chunks 第 2 条路）。analyses.producer 是 NOT NULL，读不到就留 None 不猜。
+    arow = conn.execute(
+        "SELECT report_json, producer FROM analyses WHERE analysis_id = ?", (analysis_id,)
+    ).fetchone()
+    report = json_loads(arow, {}) or {}
+    producer = arow["producer"] if arow is not None else None
     tags_by_title: dict[tuple[str, str], list[str]] = {}
     for feat in (report.get("features", []) if isinstance(report, dict) else []):
         slug = feat.get("key")
@@ -215,6 +220,7 @@ def index_analysis(
             "repo_id": None,
             "language": None,
             "heading": f["title"],
+            "producer": producer,
         })
         cards = conn.execute(
             "SELECT card_id, kind, title, summary, mechanism_desc, language, reusable, "
@@ -248,6 +254,7 @@ def index_analysis(
                 "repo_id": None,
                 "language": c["language"],
                 "heading": c["title"],
+                "producer": producer,
             })
             n_cards += 1
     # report_section：把 Markdown 按 H2 切段（每段一块）
@@ -264,6 +271,7 @@ def index_analysis(
                 "repo_id": None,
                 "language": None,
                 "heading": section.splitlines()[0][:120] if section else "",
+                "producer": producer,
             })
             n_sections += 1
     drop_chunks_by_ref(conn, "feature", ref_ids)

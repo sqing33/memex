@@ -740,6 +740,8 @@ stdio 本地形态下调用它也允许（返回本地文件 `file://` 路径或
           "heading":    { "type": "string" },
           "tags":       { "type": "array", "items": { "type": "string" } },
           "language":   { "type": "string" },
+          "producer":   { "enum": ["agent", "batch"], "description": "这条结果的生产者（G21）。`**没有这个键就是来源不明**"
+                                        "（历史块 / 加列之前建的块 / 拿不到多数的 pattern 块）——不要当成 agent" },
           "mechanism_desc": { "type": "string", "description": "detail>=normal；建向量用的英文机制描述" },
           "excerpt":    { "type": "string" },
           "card_id":    { "type": "string", "description": "chunk_kind=card 时给出，可直接喂 T9" },
@@ -767,6 +769,11 @@ stdio 本地形态下调用它也允许（返回本地文件 `file://` 路径或
 - `chunk_kind='pattern'` 时**无 `repo`**，改用 `repos: [全名…]` + `pattern_key`（G14）。
 - **结果必须带 `repo_id` 与版本**（`repo.analyzed_sha` + `repo.is_stale`）——
   借鉴到过时实现在所难免，但要**显式可见**。
+- `results[].producer`（G21 补记）：块在**建块那一刻**就把来源定死在
+  `chunks.producer` 列上。**没有这个键就是来源不明**——历史块（加列之前建的）`一律不补默认值，
+  「把『不知道』写成 `agent`』」是假信号。`chunk_kind='pattern'` 的
+  producer 由成员卡 producer **多数投票**得出，平票或成员全为不明时**不给这个键**；
+  它天然跨仓跨 producer，单值是简写不是事实。
 - **库为空或全不匹配时不报错**：`results: []` + `notes`。
 
 ### T9 · `get_card` — 取单张卡片

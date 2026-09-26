@@ -61,7 +61,7 @@ def _load_cards(conn: sqlite3.Connection, embedder: Embedder) -> list[dict[str, 
         if vrow is None:
             continue
         arow = conn.execute(
-            "SELECT a.repo_id FROM cards c JOIN features f ON c.feature_id = f.feature_id "
+            "SELECT a.repo_id, a.producer FROM cards c JOIN features f ON c.feature_id = f.feature_id "
             "JOIN analyses a ON f.analysis_id = a.analysis_id WHERE c.card_id = ?",
             (cid,),
         ).fetchone()
@@ -71,6 +71,7 @@ def _load_cards(conn: sqlite3.Connection, embedder: Embedder) -> list[dict[str, 
             "card_id": cid,
             "feature_id": c["feature_id"],
             "repo_id": arow["repo_id"],
+            "producer": arow["producer"],
             "title": c["title"],
             "mechanism_desc": c["mechanism_desc"] or "",
             "vec": unpack_vector(vrow["vec"]),
@@ -152,6 +153,24 @@ def cluster_cards(
     return clusters
 
 
+def _vote_producer(cluster: list[dict[str, Any]]) -> str | None:
+    """簇内成员 producer 的多数值（G21）。平票或全为 None 时返回 None。
+
+    pattern 块跨仓跨 producer，单个 producer 本来就是简写；但「拿不到多数」与
+    「碰巧多数是 agent」是两件事，混成一个值就是假信号。
+    """
+    tally: dict[str, int] = {}
+    for c in cluster:
+        v = c.get("producer")
+        if isinstance(v, str) and v:
+            tally[v] = tally.get(v, 0) + 1
+    if not tally:
+        return None
+    best = max(tally.values())
+    winners = [k for k, n in tally.items() if n == best]
+    return winners[0] if len(winners) == 1 else None
+
+
 def _member_scores(cluster: list[dict[str, Any]]) -> dict[str, float]:
     """每个成员的 score = 它与簇内**所有**其他成员的最小余弦。
 
@@ -231,6 +250,9 @@ def recluster(conn: sqlite3.Connection, cfg: Config, *, threshold: float = DEFAU
                 "repo_id": None,
                 "language": None,
                 "heading": title,
+                # G21 补记：pattern 天然跨仓跨 producer，这里是**简写**不是事实——
+                # 取成员 producer 的多数值，平票或成员全为 None 时留 None。
+                "producer": _vote_producer(cluster),
             })
         patterns_written += 1
 

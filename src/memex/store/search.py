@@ -415,7 +415,8 @@ def _hydrate(conn: sqlite3.Connection, fused: dict[str, float], match_channels: 
     items: list[dict[str, Any]] = []
     for cid, base in fused.items():
         row = conn.execute(
-            "SELECT chunk_id, kind, ref_id, card_id, text, repo_id, language, heading FROM chunks WHERE chunk_id = ?",
+            "SELECT chunk_id, kind, ref_id, card_id, text, repo_id, language, heading, producer "
+            "FROM chunks WHERE chunk_id = ?",
             (cid,),
         ).fetchone()
         if row is None:
@@ -429,6 +430,9 @@ def _hydrate(conn: sqlite3.Connection, fused: dict[str, float], match_channels: 
             "heading": row["heading"],
             "repo_id": row["repo_id"],
             "language": row["language"],
+            # G21：可能是 None —— 历史块（加列之前建的）与跨 producer 的 pattern 块。
+            # **不给默认值**，调用方拿到 null 应理解成「不知道」，不是「agent」。
+            "producer": row["producer"],
             "score": round(base * prior, 6),
             "rrf": round(base, 6),
             "matched_by": sorted(match_channels.get(cid, set())),

@@ -149,9 +149,13 @@ $MEMEX_HOME/                    （默认 ~/.memex）
   pattern_intents(pattern_id FK, text)        ← 非对称因子分解出的「意图探针」向量文本
 
 ⑤ 检索（可重建，不进备份的必需集）
-  chunks(chunk_id PK, kind, ref_id, card_id, text, repo_id, language, heading)
+  chunks(chunk_id PK, kind, ref_id, card_id, text, repo_id, language, heading, producer)
         kind ∈ feature | card | pattern | report_section
         ref_id: pattern chunk 存 pattern_key（'pat:<key>'）；repo_id 对 pattern 允许 NULL（★ G14）
+        producer: 这条块的生产者（agent | batch | import），**建块那一刻就定死**。★ G21 补记：
+                  历史块与无法判定来源的块为 NULL —— 「把『不知道』写成『agent』」是假信号；
+                  pattern 块的 producer 由成员卡的 producer 多数投票得出（平票/全 NULL 留 NULL），
+                  因此 pattern 的 producer 是简写而不是事实（它天然跨仓跨 producer）。
   chunk_vectors(chunk_id PK, embedder, dim, vec BLOB)   ← ★ G11：每行记自己的编码模型
                                                         vec = float32 小端打包
   chunk_fts                                        ← FTS5，tokenize='trigram'

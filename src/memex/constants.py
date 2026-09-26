@@ -16,7 +16,7 @@ CONTRACT_ID = "memex/report/1"
 CONTRACT_VERSION = "1"
 
 # —— 数据库 schema 版本（meta.schema_version，docs/tech-design.md §2.2）——
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 
 # —— 五个原理轴（docs/report-contract.md §3）——
 PRINCIPLE_KEYS: tuple[str, ...] = (

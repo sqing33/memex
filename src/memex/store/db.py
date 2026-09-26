@@ -16,7 +16,7 @@ import json
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from ..constants import SCHEMA_VERSION
 from ..core import Config, MemexError, Paths
@@ -188,7 +188,8 @@ DDL_STATEMENTS: tuple[str, ...] = (
         text     TEXT NOT NULL,
         repo_id  TEXT,
         language TEXT,
-        heading  TEXT
+        heading  TEXT,
+        producer TEXT
     )""",
     """CREATE TABLE IF NOT EXISTS chunk_vectors (
         chunk_id TEXT PRIMARY KEY,
@@ -249,26 +250,94 @@ def _meta_set(conn: sqlite3.Connection, key: str, value: str) -> None:
     )
 
 
-def create_schema(conn: sqlite3.Connection) -> None:
+def create_schema(conn: sqlite3.Connection) -> list[str]:
+    """建表 / 建索引 / 补列（幂等）。返回 _ensure_columns 实际补上的列。
+
+    返回值不是装饰：migrate 要靠它如实报告「这次迁移到底动了什么」。
+    """
     for stmt in DDL_STATEMENTS:
         conn.execute(stmt)
     for stmt in INDEX_STATEMENTS:
         conn.execute(stmt)
-    _ensure_columns(conn)
+    return _ensure_columns(conn)
 
 
 # 列级增量迁移：为既有库补上后加的列（幂等）。值 = (表, 列, 列定义)。
 _COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("analyses", "reindex_state", "TEXT NOT NULL DEFAULT 'indexed'"),
     ("repos", "merged_into", "TEXT"),
+    # G21 补记：块的生产者。**故意不给默认值**——这列之前建的历史块留 NULL，
+    ("chunks", "producer", "TEXT"),
 )
 
 
-def _ensure_columns(conn: sqlite3.Connection) -> None:
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone()
+    return row is not None
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {str(r["name"]) for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _ensure_columns(conn: sqlite3.Connection) -> list[str]:
+    """补齐 _COLUMN_MIGRATIONS 里缺的列，返回实际补上的列名（幂等，可重复跑）。"""
+    added: list[str] = []
     for table, column, decl in _COLUMN_MIGRATIONS:
-        existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
-        if column not in existing:
+        if not _table_exists(conn, table):
+            continue
+        if column not in _table_columns(conn, table):
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+            added.append(f"{table}.{column}")
+    return added
+
+
+def assert_expected_columns(conn: sqlite3.Connection) -> None:
+    """断言本版代码要用到的列都在。缺列不是「运行时报错」，是**启动时就说清楚**。
+
+    G9 补记的由来：旧库停在 schema "1"、新版代码已经在读写 chunks.producer，
+    结果是裸 sqlite3.OperationalError 被兜成 internal，agent 只会重试。版本号对得上
+    并不代表列齐全——版本号是人手工维护的，列却是代码事实，所以这里再兜一层。
+    """
+    missing = [
+        f"{table}.{column}"
+        for table, column, _decl in _COLUMN_MIGRATIONS
+        if _table_exists(conn, table) and column not in _table_columns(conn, table)
+    ]
+    if missing:
+        raise MemexError(
+            "conflict",
+            "数据库缺少本版代码需要的列，请运行 memex migrate",
+            {"missing_columns": sorted(missing), "action": "memex migrate"},
+        )
+
+
+# 迁移注册表：键是 "from->to"，值是幂等的一步迁移。
+# G9 写的是「更低 -> 若存在 migrate_<from>_<to>() 则自动迁移」——这套注册表就是那个
+# 函数的真身。1->2 补的就是上面 _COLUMN_MIGRATIONS 那几列（纯 additive）。
+_MIGRATIONS: dict[str, Callable[[sqlite3.Connection], list[str]]] = {
+    "1->2": _ensure_columns,
+}
+
+
+def _ver_num(v: str) -> int:
+    return int(v.split(".")[0])
+
+
+def _auto_migrate(conn: sqlite3.Connection, dbv: str, codev: str) -> list[str] | None:
+    """逐级走注册表自动迁移（G9）。缺任何一级函数就返回 None，交由调用方拒绝启动。"""
+    applied: list[str] = []
+    cur = _ver_num(dbv)
+    while cur < _ver_num(codev):
+        fn = _MIGRATIONS.get(f"{cur}->{cur + 1}")
+        if fn is None:
+            return None
+        applied.extend(fn(conn))
+        cur += 1
+        _meta_set(conn, "schema_version", str(cur))
+    return applied
 
 
 def init_db(paths: Paths, *, embedder_spec: str | None = None) -> dict[str, Any]:
@@ -293,8 +362,7 @@ def init_db(paths: Paths, *, embedder_spec: str | None = None) -> dict[str, Any]
 
 
 def schema_version(conn: sqlite3.Connection) -> str | None:
-    row = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='meta'").fetchone()
-    if not row:
+    if not _table_exists(conn, "meta"):
         return None
     return _meta_get(conn, "schema_version")
 
@@ -303,13 +371,14 @@ def check_schema(conn: sqlite3.Connection) -> tuple[str, str]:
     """启动检查：返回 (db_version, code_version) 并执行 G9 规则。
 
     - db 更高 -> unsupported（拒绝启动，绝不静默降级）；
-    - db 更低 -> 提示运行 memex migrate（此处只报告，不动库）。
+    - db 更低 -> 注册表里有对应迁移函数就自动迁移，否则 conflict 并提示 memex migrate；
+    - 版本对得上也**不代表列齐全**（版本号靠人维护，列是代码事实）-> 再断言一次。
     """
     dbv = schema_version(conn) or "0"
     codev = SCHEMA_VERSION
     try:
-        dbn = int(dbv.split(".")[0])
-        cn = int(codev.split(".")[0])
+        dbn = _ver_num(dbv)
+        cn = _ver_num(codev)
     except ValueError:
         raise MemexError("internal", "schema_version 非数字", {"db": dbv, "code": codev})
     if dbn > cn:
@@ -319,26 +388,52 @@ def check_schema(conn: sqlite3.Connection) -> tuple[str, str]:
             {"db_schema_version": dbv, "code_schema_version": codev},
         )
     if dbn < cn:
-        raise MemexError(
-            "conflict",
-            "数据库 schema 版本较低，请运行 memex migrate",
-            {"db_schema_version": dbv, "code_schema_version": codev, "action": "memex migrate"},
-        )
-    return dbv, codev
+        if _auto_migrate(conn, dbv, codev) is None:
+            raise MemexError(
+                "conflict",
+                "数据库 schema 版本较低，请运行 memex migrate",
+                {"db_schema_version": dbv, "code_schema_version": codev, "action": "memex migrate"},
+            )
+    assert_expected_columns(conn)
+    return _meta_get(conn, "schema_version") or codev, codev
 
 
 def migrate(paths: Paths, *, to: str | None = None, dry_run: bool = False) -> dict[str, Any]:
-    """迁移主库。V1 只有 schema 1，迁移是「建表 + 写版本」的幂等动作。"""
+    """迁移主库：建表 + 跑注册表里的迁移函数 + 写版本（幂等）。
+
+    --dry-run 打印**真的会执行的步骤**（哪些迁移函数），不是一句空计划。
+    """
     target = to or SCHEMA_VERSION
     conn = connect(paths.db)
     try:
         dbv = schema_version(conn) or "0"
-        plan = {"from": dbv, "to": target, "steps": [] if dbv == target else [f"{dbv} -> {target}"]}
+        # 库还没建过（meta 表都没有）时，第一步不是"迁移"，而是"建表"——
+        # 所以 0->1 这一级由 create_schema 承担，不该去注册表里找函数。
+        fresh = _ver_num(dbv) == 0
+        steps: list[str] = ["create_schema"] if fresh else []
+        cur = 1 if fresh else _ver_num(dbv)
+        while cur < _ver_num(target):
+            key = f"{cur}->{cur + 1}"
+            if key not in _MIGRATIONS:
+                raise MemexError(
+                    "unsupported",
+                    f"没有 {key} 的迁移函数，请先把库升级到 memex 能读的状态",
+                    {"from": dbv, "to": target, "missing_step": key},
+                )
+            steps.append(key)
+            cur += 1
+        plan = {"from": dbv, "to": target, "steps": steps}
         if dry_run:
             return {"dry_run": True, **plan}
-        create_schema(conn)
+        # 先建表：它自己也会补列，回报值并进 applied（否则这里会谎报"什么都没改"）。
+        applied: list[str] = list(create_schema(conn))
+        cur = 1 if fresh else _ver_num(dbv)
+        while cur < _ver_num(target):
+            applied.extend(_MIGRATIONS[f"{cur}->{cur + 1}"](conn))
+            cur += 1
         _meta_set(conn, "schema_version", target)
-        return {"dry_run": False, **plan, "schema_version": target}
+        assert_expected_columns(conn)
+        return {"dry_run": False, **plan, "applied_columns": applied, "schema_version": target}
     finally:
         conn.close()
 
