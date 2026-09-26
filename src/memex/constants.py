@@ -102,3 +102,10 @@ KIND_PRIOR: dict[str, float] = {
     "pattern": 0.6,
     "report_section": 0.4,
 }
+
+# —— 检索重排（G25 实测定案；docs/decisions.md `G25 rerank 选型`）——
+# 15 探针真模型实测：ms-marco-MiniLM-L-6-v2 有害（top-1 10/15 降到 4/15），
+# BAAI/bge-reranker-base 有效（top-1 10/15 提到 13/15，MRR 0.776 提到 0.910）。
+# 默认 off 是实测结论不是省事：开之前先看上面那两行数字。
+DEFAULT_RERANK_MODEL = "BAAI/bge-reranker-base"
+RERANK_MAX_LENGTH = 512

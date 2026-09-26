@@ -20,12 +20,25 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
+import threading
 from typing import Any
 
-from ..constants import KIND_PRIOR, RRF_K
+from ..constants import (
+    DEFAULT_RERANK_MODEL,
+    KIND_PRIOR,
+    RERANK_MAX_LENGTH,
+    RRF_K,
+)
 from ..core import MemexError
-from ..embeddings import Embedder, cosine, unpack_vector
+from ..embeddings import (
+    Embedder,
+    _load_timeout_seconds,
+    _run_with_deadline,
+    cosine,
+    unpack_vector,
+)
 from .db import json_loads
 
 _CHANNEL_TOP = 50
@@ -161,6 +174,160 @@ def _rrf(rank_lists: list[list[str]], k: int = RRF_K) -> dict[str, float]:
     return fused
 
 
+# —— 检索重排（G25）——
+# _rerank_enabled 此前是死代码：旋钮接到了，后面什么都没接。这里把真重排接上。
+# 只对 RRF 融合后的候选**重排**，不增不删——所以 top-10 命中率按构造不变，
+# rerank 真正买的是「前 K 条里谁排第一」，这正是 D2 要的东西。
+# 失败一律显式报错（零假成功），绝不静默退回 RRF 假装重排成功。
+
+_CROSS_ENC_LOCK = threading.Lock()
+_CROSS_ENC_CACHE: dict[str, Any] = {}
+_CROSS_ENC_ERRORS: dict[str, MemexError] = {}
+
+
+def _load_cross_encoder(model_name: str) -> Any:
+    """加载 cross-encoder（sentence-transformers 的 CrossEncoder）。
+
+    真模型加载昂贵，联网回源可能挂几分钟（与嵌入器同一类风险），因此：
+    按模型名进程内缓存、失败结果也缓存、墙钟上限复用 MEMEX_EMBEDDER_LOAD_TIMEOUT。
+    """
+    try:
+        from sentence_transformers import CrossEncoder
+    except Exception as exc:  # noqa: BLE001 - 归一为 MemexError
+        raise MemexError(
+            "internal",
+            "rerank 需要 sentence-transformers：装 memex[default] 或把 rerank 关掉",
+            {
+                "reason": str(exc),
+                "model": model_name,
+                "outs": [
+                    "pip install memex[default]",
+                    "MEMEX_RERANK=off 关掉重排，退回三通道 RRF",
+                ],
+            },
+        ) from exc
+
+    def build() -> Any:
+        return CrossEncoder(model_name, max_length=RERANK_MAX_LENGTH)
+
+    # 离线优先，与嵌入器同一套路（embeddings.py:191）：命中本地 HF 缓存即不联网；
+    # 只有本地没有才联网拉一次，且有墙钟上限。
+    # 注意 bge-reranker-base 是 1.1GB 级的模型，比嵌入器重得多，
+    # 墙钟上限用独立的 MEMEX_RERANK_LOAD_TIMEOUT（默认 120s）而不是复用 20s。
+    label = "cross-encoder " + model_name
+    try:
+        return CrossEncoder(model_name, max_length=RERANK_MAX_LENGTH, local_files_only=True)
+    except Exception:  # noqa: BLE001 - 本地无缓存 -> 联网拉取一次（有界）
+        pass
+    return _run_with_deadline(build, _rerank_load_timeout_seconds(), label)
+
+
+def _rerank_load_timeout_seconds() -> float:
+    """cross-encoder 联网加载的墙钟上限（秒）。
+
+    独立于 MEMEX_EMBEDDER_LOAD_TIMEOUT：bge-reranker-base 约 1.1GB，
+    用嵌入器的 20s 默认值会**必然超时**（实测首次联网加载就撞了 20s 上限）。
+    """
+    raw = os.environ.get("MEMEX_RERANK_LOAD_TIMEOUT")
+    if raw:
+        try:
+            v = float(raw)
+            if v > 0:
+                return v
+        except ValueError:
+            pass
+    return 120.0
+
+
+def _get_cross_encoder(model_name: str) -> Any:
+    """按模型名取 cross-encoder（进程内缓存，失败也缓存）。"""
+    key = model_name.strip() or DEFAULT_RERANK_MODEL
+    hit = _CROSS_ENC_CACHE.get(key)
+    if hit is not None:
+        return hit
+    err = _CROSS_ENC_ERRORS.get(key)
+    if err is not None:
+        raise err
+    with _CROSS_ENC_LOCK:
+        hit = _CROSS_ENC_CACHE.get(key)
+        if hit is not None:
+            return hit
+        err = _CROSS_ENC_ERRORS.get(key)
+        if err is not None:
+            raise err
+        try:
+            hit = _load_cross_encoder(key)
+        except MemexError as exc:
+            _CROSS_ENC_ERRORS[key] = exc
+            raise
+        except Exception as exc:  # noqa: BLE001 - 归一为 MemexError 并缓存
+            wrapped = MemexError(
+                "internal",
+                "加载 cross-encoder 失败：" + str(exc),
+                {"model": model_name, "reason": str(exc)},
+            )
+            _CROSS_ENC_ERRORS[key] = wrapped
+            raise wrapped from exc
+        _CROSS_ENC_CACHE[key] = hit
+        return hit
+
+
+def _resolve_rerank_model(cfg_rerank: str) -> str:
+    """把配置值解析成模型名：on / true / 1 走 G25 定案的默认模型名。"""
+    raw = (cfg_rerank or "").strip()
+    if raw.lower() in ("on", "true", "1", "yes", "default"):
+        return DEFAULT_RERANK_MODEL
+    return raw
+
+
+def _apply_rerank(
+    items: list[dict[str, Any]],
+    query: str,
+    model_name: str,
+    rerank: Any,
+    notes: list[str],
+) -> list[dict[str, Any]]:
+    """用 cross-encoder 对已融合的候选重排（只换顺序，不增不删）。
+
+    rerank 参数是现成的 cross-encoder 对象时直接用它（测试与调用方注入），
+    否则按 model_name 取进程内缓存的实例。
+    """
+    if not items:
+        return items
+    encoder = rerank if not isinstance(rerank, bool) and rerank is not None else None
+    if encoder is None:
+        encoder = _get_cross_encoder(model_name)
+    pairs = [(query, str(it.get("text") or "")) for it in items]
+    try:
+        scores = list(encoder.predict(pairs))
+    except Exception as exc:  # noqa: BLE001 - 归一为 MemexError，不静默退回 RRF
+        raise MemexError(
+            "internal",
+            "cross-encoder 打分失败：" + str(exc),
+            {
+                "model": model_name,
+                "reason": str(exc),
+                "outs": [
+                    "MEMEX_RERANK=off 关掉重排，退回三通道 RRF",
+                    "换一个 cross-encoder 模型名（MEMEX_RERANK=<name>）",
+                ],
+            },
+        ) from exc
+    if len(scores) != len(items):
+        raise MemexError(
+            "internal",
+            "cross-encoder 返回的分数条数与候选数不一致",
+            {"model": model_name, "scores": len(scores), "candidates": len(items)},
+        )
+    for it, sc in zip(items, scores):
+        it["rerank_score"] = round(float(sc), 6)
+    notes.append(
+        "rerank=%s：对前 %d 条候选重排（只重排不增删，召回集合不变）" % (model_name, len(items))
+    )
+    # 稳定排序：分数降序；同分保持 RRF 原序（list.sort 是稳定排序）。
+    return sorted(items, key=lambda it: -float(it["rerank_score"]))
+
+
 def _rerank_enabled(rerank: Any, cfg_rerank: str) -> bool:
     if rerank is None:
         return cfg_rerank not in ("", "off", "false", "0")
@@ -230,6 +397,16 @@ def search(
     total = len(items)
     if limit:
         items = items[:limit]
+    # G25：重排只换顺序不增不删，截断后生效——所以它买的是「前 K 条里谁排第一」
+    # 而不是扩大召回集合。默认 off（实测 ms-marco 有害、bge 有效，见 decisions.md）。
+    if _rerank_enabled(rerank, cfg_rerank):
+        items = _apply_rerank(
+            items,
+            q,
+            _resolve_rerank_model(str(rerank) if not isinstance(rerank, bool) and rerank else cfg_rerank),
+            rerank if not isinstance(rerank, bool) and rerank is not None else None,
+            notes,
+        )
     return {"count": len(items), "total": total, "items": items, "channels": channels, "query": q,
             "notes": notes}
 

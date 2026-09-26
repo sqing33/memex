@@ -446,7 +446,10 @@ agent 的工具链崩掉一个 MCP 连接是很烦的事，而只要核心层零
 ```
 $MEMEX_HOME              默认 ~/.memex（远程：/var/lib/memex）
 $MEMEX_EMBEDDER          默认 sentence-transformers 模型名；可设 hash:512 / http:<url>
-$MEMEX_RERANK            默认 off；可设 cross-encoder 模型名
+$MEMEX_RERANK            默认 off；可设 cross-encoder 模型名（on = 用默认模型）。
+                      默认 off 是实测结论不是省事：
+                      ms-marco-MiniLM-L-6-v2 让 top-1 掉 6 个，
+                      BAAI/bge-reranker-base 抬 3 个（G25，见 decisions.md）
 $MEMEX_TOKEN             远程形态：访问所需的 Bearer Token（见 §4.4）
 ```
 

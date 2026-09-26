@@ -68,7 +68,9 @@ git clone https://$TOKEN@github.com/me/private.git
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `MEMEX_EMBEDDER` | `sentence-transformers` 多语种模型名 | 可设 `hash:512`（仅冒烟）/ `http:<url>` |
-| `MEMEX_RERANK` | `off` | 可设 cross-encoder 模型名（G25 待实测选型） |
+| `MEMEX_RERANK` | `off` | 可设 cross-encoder 模型名，或 on 用默认模型。**默认 off 是实测结论不是省事**：ms-marco-MiniLM-L-6-v2 让 top-1 掉 6 个，BAAI/bge-reranker-base 抬 3 个（G25）|
+| `MEMEX_RERANK_LOAD_TIMEOUT` | `120` | cross-encoder 联网加载的墙钟上限（秒）。
+  独立于嵌入器的 20s：`BAAI/bge-reranker-base` 约 1.1GB，用 20s 必然超时（G25）|
 
 > **混模型库会被拒绝**：写入与检索两端都断言 `chunk_vectors.embedder == meta.embedder`，
 > 不一致直接报 `conflict` 并提示跑 `memex reindex --embedder X`（G11）。
@@ -160,6 +162,10 @@ git clone https://$TOKEN@github.com/me/private.git
    **显式** `MEMEX_EMBEDDER=hash:512`。联网加载设**墙钟上限**（默认 20s，
    `MEMEX_EMBEDDER_LOAD_TIMEOUT` 可调），超时即报错而非无限挂起；**失败结果被缓存**，
    后续调用立即报同一错误（不重复等待）。
+   cross-encoder（rerank）走**同一套缓存与失败缓存**逻辑，但墙钟上限独立：
+   `MEMEX_RERANK_LOAD_TIMEOUT`，默认 **120s**——`bge-reranker-base` 约 1.1GB，
+   沿用嵌入器的 20s 会**必然超时**（实测首次联网加载就撞了 20s）。重排失败同样**显式报错**，
+   不静默退回 RRF 假装重排成功。
    **只有显式写 `hash:512` 才降级**，且启动横幅与 `recall_stats` 必须带
    `degraded:true, embedder:"hash"`——**默认路径绝不静默退 hash**（D1：hash 无语义 = 跨语言卖点消失）。
 5. `MEMEX_TOOLS` 解析成功；打印放行集。
