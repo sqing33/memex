@@ -931,7 +931,7 @@ stdio 本地形态下调用它也允许（返回本地文件 `file://` 路径或
         "analyst":     { "type": "string" },
         "producer":    { "enum": ["agent", "batch"] },
         "depth":       { "type": "string" },
-        "status":      { "enum": ["drafting", "ready", "failed", "stale"] },
+        "status":      { "enum": ["drafting", "committed", "failed", "stale"] },
         "created_at":  { "type": "string" },
         "finished_at": { "type": "string" },
         "counts":      { "type": "object" },

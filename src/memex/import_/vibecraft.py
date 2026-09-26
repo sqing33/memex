@@ -28,7 +28,9 @@ from typing import Any
 
 from ..constants import CONTRACT_ID, CONTRACT_VERSION, MIN_PRINCIPLE_UNITS, PRINCIPLE_KEYS, REGEX_CJK
 from ..core import Config, MemexError, Paths, count_units, is_blank, repo_id_for, slugify
+from ..embeddings import get_embedder
 from ..store import db
+from ..store import index as store_index
 
 _ANALYST = "vibecraft-import"
 _PRODUCER = "batch"
@@ -1083,7 +1085,8 @@ def _import_all_conn(
         analysis_payload = {
             "analysis_id": analysis_id, "repo_id": repo_id, "commit_sha": commit_sha,
             "contract_version": CONTRACT_VERSION, "depth": _DEPTH, "analyst": _ANALYST,
-            "producer": _PRODUCER, "status": "ready",
+            # status 只表达「能不能当成结论用」，来源由 producer/analyst 区分：
+            "producer": _PRODUCER, "status": "committed",
             "report_md": _render_markdown(report, full_name),
             "report_json": db.json_dumps(report), "counts_json": db.json_dumps(counts_json),
             "quality_json": db.json_dumps(quality), "created_at": now, "finished_at": now,
@@ -1094,6 +1097,8 @@ def _import_all_conn(
             "cards": card_payloads, "evidence": evidence_payloads, "chunks": chunk_payloads,
         })
 
+    indexed = 0
+    indexed = 0
     if not dry_run and pending_writes:
         _ensure_db(paths)
         wconn = db.connect(str(paths.db))
@@ -1104,6 +1109,29 @@ def _import_all_conn(
             for payload in pending_writes:
                 _persist_analysis(wconn, payload)
             wconn.execute("COMMIT")
+
+            # P0-2：块落库后立刻建索引。原来这里什么都不做，只在返回体里告诉用户
+            # 「下一步去跑 reindex」——可 reindex 只覆盖 status 对得上的分析，
+            # 且跳过 reindex_state='pending' 的块，这条建议既绕又可能无效：
+            # 用户照做后仍召不回任何回填内容。这里就地建好，只覆盖本次写入的行。
+            embedder = get_embedder(cfg.embedder or None)
+            for payload in pending_writes:
+                ana = payload["analysis"]
+                if ana.get("reindex_state") == "pending":
+                    # 机制描述非英文的卡片本来就「入库但不建块」（模块 docstring），
+                    # 显式跳过而不是等 reindex 碰运气。
+                    continue
+                try:
+                    store_index.index_analysis(
+                        wconn, embedder, ana["analysis_id"], report_md=None
+                    )
+                    store_index.set_chunk_repo(wconn, ana["repo_id"])
+                    indexed += 1
+                except Exception as exc:  # noqa: BLE001 索引是派生层，回填本体已成功
+                    warnings.append(
+                        ana["repo_id"] + " 索引构建失败（内容已回填，可用 reindex 补建）："
+                        + str(exc)
+                    )
         except sqlite3.Error as exc:
             try:
                 wconn.execute("ROLLBACK")
@@ -1126,7 +1154,12 @@ def _import_all_conn(
         "drop_reasons": drop,
         "evidence_hit_rate": rate,
         "pending_mechanism": pending_mechanism,
-        "next_step": {"action": "reindex"},
+        "next_step": (
+            {"action": "search", "note": "回填内容已落库并建好索引，可直接 search"}
+            if indexed
+            else {"action": "reindex", "note": "本次未建索引（多为机制描述非英文），可用 reindex 补建"}
+        ),
+        "indexed_analyses": indexed,
     }
     if pending_writes and dry_run:
         result["planned_writes"] = len(pending_writes)

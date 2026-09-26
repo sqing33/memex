@@ -138,7 +138,7 @@ git clone https://$TOKEN@github.com/me/private.git
 | `memex export-site [--out DIR]` | 静态目录页 |
 | `memex stats` | 知识库总览（含按 producer 分组的质量，G21） |
 | `memex forget-repo <repo_id> --yes` | CLI 版删除（G8）；MCP 侧是 `forget_repo` |
-| `memex import-vibecraft <path> [--dry-run]` | 从 VibeCraft 回填（G12）；**只读** VibeCraft 库；强制过 `validate_report` + 从真实文件重切证据；过不了的卡片**丢弃并计数**；`--dry-run` 只出报告不落库 |
+| `memex import-vibecraft <path> [--dry-run]` | 从 VibeCraft 回填（G12）；**只读** VibeCraft 库；强制过 `validate_report` + 从真实文件重切证据；过不了的卡片**丢弃并计数**；**回填时同一次调用就把索引建好**（`indexed_analyses` 计数），不必再手动 `reindex`；`--dry-run` 只出报告不落库 |
 
 ---
 
@@ -186,7 +186,7 @@ git clone https://$TOKEN@github.com/me/private.git
 
 `reindex` 会先清空 `chunks` / `chunk_vectors` / `chunk_fts` 三张派生表，再逐条重建——所以它的筛选条件就是**真源层会不会被抹掉**的分界线。
 
-两条落库路径写的 `analyses.status` 不同：agent 走 `commit_report` 写 `committed`，VibeCraft 回填写 `ready`。**只筛 `committed` 会把回填进来的索引删掉且永不重建**，而 `import-vibecraft` 的 `next_step` 恰恰让用户去跑 reindex——闭环断裂。两个值都必须进筛选。
+两条落库路径**统一写 `committed`**（来源由 `producer` 字段区分：agent 路径 `agent`、VibeCraft 回填 `batch`）。`reindex` 仍按 `committed` 与 `ready` 两个值筛选——`ready` 是历史遗留，老库里可能还有。
 
 | 现象 | 根因 | 处置 |
 |---|---|---|

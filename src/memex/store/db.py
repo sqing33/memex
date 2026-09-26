@@ -26,7 +26,8 @@ from ..core import Config, MemexError, Paths
 _MIN_THREADSAFETY = 3
 
 # reindex 要重建索引的 analyses.status 取值（见 reindex docstring）。
-# 两条落库路径写的值不同：agent 走 commit_report 写 committed，VibeCraft 回填写 ready。
+# 口径：status 只表达「这份分析能不能被当成结论用」，来源由 producer/analyst 区分，
+# 所以 agent 提交与 VibeCraft 回填**都写 committed**（docs/mcp-tools.md T11 枚举里没有 ready）。
 # 派生表清空后若漏筛某条，它的索引就再也回不来——所以这里是全集，且有守卫函数兜底。
 _REINDEXABLE_STATUSES: tuple[str, ...] = ("committed", "ready")
 
@@ -425,8 +426,8 @@ def _assert_reindex_covers_all(conn: sqlite3.Connection) -> None:
 def reindex(paths: Paths, *, embedder_spec: str | None = None) -> dict[str, Any]:
     """整层重建索引：清空 chunks/vectors/fts，再按 analyses 逐条重算（R层）。
 
-    覆盖范围是 `_REINDEXABLE_STATUSES` 的全集：agent 提交写 `committed`、
-    VibeCraft 回填写 `ready`，两条落库路径一视同仁。派生表被清空后若漏筛某条，
+    覆盖范围是 `_REINDEXABLE_STATUSES` 的全集：agent 提交与 VibeCraft 回填
+    **都写 `committed`**（来源由 producer 区分，不用 status 区分）。派生表被清空后若漏筛某条，
     它的索引就再也回不来（V5 审计 BUG-1），故选不中任何已落库分析时显式报错，
     不静默产出空索引。
     """

@@ -394,7 +394,11 @@ VibeCraft 的库格式已实地核对（读其 `backend/internal/store/` 与 `se
 **硬约束**：回填同样要过 `validate_report`（否则等于绕过证据链门禁）；`mechanism_desc` 必须
 **语言中立**（G13/D1），VibeCraft 的中文 `mechanism` 需 agent 补写英文描述前先标
 `reindex_state='pending'` 排除出检索；产物标 `producer=batch` / `analyst=vibecraft-import`。
-**索引层覆盖范围**：`reindex` 清空三张派生表后按 `analyses.status` 逐条重建，而回填写 `ready`、agent 提交写 `committed`——**两个值都要进筛选**，否则回填索引会被物理删除且永不重建（派生表可重建，但重建不出来）。
+**status 口径**：两条落库路径**统一写 `committed`**——来源由 `producer` 字段区分（agent 路径 `agent`、VibeCraft 回填 `batch`），不用 status 区分来源，这样 T11 / T12 的读路径对两条来源一视同仁。
+
+**索引层覆盖范围**：`reindex` 清空三张派生表后按 `analyses.status` 逐条重建，故筛选里同时保留 `committed` 与 `ready`（后者是历史遗留，老库里可能还有），否则回填索引会被物理删除且永不重建。
+
+**回填自带索引**：`import-vibecraft` 在写完块之后**同一次调用里就地建索引**（`index_analysis` + `set_chunk_repo`），返回体报 `indexed_analyses`。原因：回填内容里机制描述非英文的卡片会落成 `reindex_state='pending'` 且**不建块**（见下文 reindex_state 约定），把建索引外包给用户手动 `reindex` 等于把可见性交给对方；索引是派生层，建失败只记 warning 不影响回填本体，用户仍可用 `reindex` 补建。
 
 **代价要诚实**：两处落差决定了「相当一部分旧卡片回填不过」，所以 `--dry-run` 必做、
 `evidence_hit_rate` 必报——**能救几张是几张**，不追求全量。
