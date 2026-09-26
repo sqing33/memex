@@ -746,8 +746,15 @@ stdio 本地形态下调用它也允许（返回本地文件 `file://` 路径或
 ```
 
 **要点**
-- 三通道 **RRF(k=60)** 融合（vector / keyword / substr），`score` 是融合分不是余弦；
+- **RRF(k=60)** 融合两个投票通道（vector / keyword），`score` 是融合分不是余弦；
+  第三通道 substr 是**兜底通道**：只在 keyword 返空时参与投票——两个文本通道
+  在降级路径上是同一个测量，各占 1/3 等于把字面信号加权两次（G29，见 tech-design §2.5）。
+  `channels` 仍如实给出三个通道各自实际参与投票的条数。
   融合后乘 `kind_prior`（`card 1.0 / feature 0.9 / pattern 0.6 / report_section 0.4`，初值，G14）。
+- 两个文本通道（keyword / substr）是**两级降级**：先整串连续匹配（符号名、短查询），
+  整串无命中时降级为 **trigram OR 匹配**（按位置切 3 字符窗口，中英文一视同仁），
+  否则整句自然语言查询恒 0 命中、三通道融合退化成单路向量（V3 实测，见 tech-design §2.2）；
+  响应 @@channels@@ 字段如实给出每个通道实际参与投票的条数，@@notes@@ 标出文本通道用的级别。
 - `chunk_kind='pattern'` 时**无 `repo`**，改用 `repos: [全名…]` + `pattern_key`（G14）。
 - **结果必须带 `repo_id` 与版本**（`repo.analyzed_sha` + `repo.is_stale`）——
   借鉴到过时实现在所难免，但要**显式可见**。
