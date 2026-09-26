@@ -134,7 +134,7 @@ git clone https://$TOKEN@github.com/me/private.git
 | `memex init` | 建库、写 `meta`、初始化目录 |
 | `memex serve-mcp` | 本地 stdio 形态 |
 | `memex serve-http --host 127.0.0.1 --port 8931` | 远程 Streamable HTTP 形态 |
-| `memex reindex [--embedder X]` | 重算全部 chunk 向量并更新 `meta`（换模型后用，G11） |
+| `memex reindex [--embedder X] [--repo REPO_ID ...]` | 重算 chunk 向量并更新 `meta`（换模型后用，G11）；`--repo` 可重复，只重建指定仓（`§5.3`）；全量重建才清空三张派生表 |
 | `memex migrate [--to X] [--dry-run]` | 真源层迁移（G9）；`--dry-run` 只打印计划 |
 | `memex export-site [--out DIR]` | 静态目录页 |
 | `memex stats` | 知识库总览（含按 producer 分组的质量，G21） |
@@ -213,6 +213,48 @@ from memex.fetch.detect import detect_language;
 print(detect_language('/root/.memex/repos/github.com__tokio-rs__axum'))
 "
 ``
+
+### 5.3 reindex 分仓与增量（P1-4）
+
+`reindex` 此前只有一个模式：**清空三张派生表全表重建**。这在「换嵌入模型」时是对的
+（全库向量都要重算，分仓没有意义），但换模型之外的两类场景被它误伤了：
+
+| 场景 | 全量 reindex 的问题 |
+|---|---|
+| 某仓的分析刚落库，向量算错了要单独重算 | 把全库 O(全部) 重算一遍 |
+| 只想确认一个仓的索引是否健康 | 同上，且**期间该仓完全不可检索**（派生表先被清空） |
+
+**决定：加 `--repo <repo_id>`（可重复），分仓重建时**只清空该仓的块**。**
+
+两条实现约束，都是被「派生表可重建」这条分层逼出来的：
+
+1. **分仓不能靠 `DELETE FROM chunks WHERE repo_id = ?` 就完事**——`chunks.repo_id` 由
+   `set_chunk_repo` 事后回填，可能为 NULL（`index_analysis` 写块时不带 repo_id）。
+   所以分仓重建要先按 `ref_id -> analyses.repo_id` 反查，**把所有可能属于该仓的块**捞出来删，
+   宁可多删同仓的（该仓自己的）也不漏。
+2. **pattern 块是跨仓的**（`kind='pattern'`，`ref_id=pattern_id`）。某仓换模型时
+   pattern 向量必须一并重算，否则新算的 card 向量和旧 pattern 向量不同源，
+   相似度失真。故分仓 reindex 的动作是：**清该仓的 feature/card/report_section 块 +
+   重建该仓分析 + 重跑 recluster**（recluster 只读现存向量，重算自己的 pattern 块）。
+
+3. **只按 ref 反查还不够：孤儿块要靠 `chunks.repo_id` 再扫一遍。**
+   ref 已不存在的块（卡从报告里删了、导入中断）既不在 `features` 表里，也不在 `cards` 表里，
+   任何 ref 反查都枚举不到，它会带着旧向量**永远留在检索集里**——
+   症状是「召回一条早已不存在的卡片」，同样零报错。所以两条路子是互补的，缺一条就漏。
+   删掉几条按哪条路枚举的会报在返回值的 `dropped` 里（`[(路数, 条数)]`），
+   全量重建走的是清空三表、不经过这一步，故 `dropped` 为空。
+
+**不加的东西**（说清楚免得下一个人又加一遍）：
+「按 `--since <时间>` 只重建最近变更」这类**基于时间的增量是错的**——
+索引层的失效原因不止「分析变了」：换模型、`quality_json` 被补、卡被改、聚类阈值调整，
+都与时间无关。按时间筛会漏掉它们，而漏掉的症状是**静默的坏检索**。
+真正正确的增量判据是**块的身份**（哪些分析有块、块该长什么样），
+那需要给块加内容指纹，属于另一件事，不在这里假装已有。
+
+**`--repo` 与换模型的互斥**：同时给 `--embedder X` 和 `--repo` **允许**（换模型只重算一仓，
+其余仓的向量留在库里但 embedder 标识不一致）——所以**分仓重建必须在收尾时报出**
+`embedder_mismatch_repos`（其余 embedder 与 meta 不一致的仓），否则撞上 G11 的
+「混模型库直接报 conflict」，用户得自己猜是哪几个仓。
 
 ## 6. 常见故障与处置
 

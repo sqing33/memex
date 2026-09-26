@@ -32,8 +32,10 @@ def _build_parser() -> argparse.ArgumentParser:
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8931)
 
-    s = sub.add_parser("reindex", help="重算全部 chunk 向量并更新 meta（换模型后用，G11）")
+    s = sub.add_parser("reindex", help="重算 chunk 向量并更新 meta（换模型后用，G11）")
     s.add_argument("--embedder", default=None)
+    s.add_argument("--repo", action="append", dest="repo_ids", default=None, metavar="REPO_ID",
+                 help="只重建该仓的索引，可重复；不给 = 整层清空重建（P1-4）")
 
     s = sub.add_parser("migrate", help="真源层迁移（G9）")
     s.add_argument("--to", default=None)
@@ -88,7 +90,11 @@ def main(argv: list[str] | None = None) -> int:
             from .store.db import reindex
 
             cfg = _config()
-            res = reindex(cfg.paths, embedder_spec=args.embedder or cfg.embedder or None)
+            res = reindex(
+                cfg.paths,
+                embedder_spec=args.embedder or cfg.embedder or None,
+                repo_ids=args.repo_ids,
+            )
             print(json.dumps(res, ensure_ascii=False))
             return 0
         if cmd == "migrate":

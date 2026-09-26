@@ -431,16 +431,105 @@ def _assert_reindex_covers_all(conn: sqlite3.Connection) -> None:
         )
 
 
-def reindex(paths: Paths, *, embedder_spec: str | None = None) -> dict[str, Any]:
-    """整层重建索引：清空 chunks/vectors/fts，再按 analyses 逐条重算（R层）。
+def _drop_repo_chunks(
+    conn: sqlite3.Connection, repo_ids: list[str]
+) -> list[tuple[str, int]]:
+    """清空这几个仓的全部块：两条互补的路子，缺一条就会静默留下脏块。
+
+    1. **按 ref 反查**（`drop_chunks_by_ref`）：`index_analysis` 写块时 repo_id 留空，
+       由 `set_chunk_repo` 事后回填。只按 repo_id 删会漏掉还没回填的块，
+       重建时新旧块并存 —— 表现为「同一张卡召回两次」，且不报错。
+    2. **按 chunks.repo_id 删**：只按 ref 反查会漏掉**孤儿块** —— ref 已不存在
+       （卡从报告里删了、导入中断）的块既不在 features 也不在 cards 里，
+       任何 ref 反查都枚举不到，它会带着旧向量永远留在检索集里，
+       表现为「召回一条早已不存在的卡片」，同样不报错。
+
+    两条路都只动本次指定仓；全量 reindex 走的是清空三张派生表，不经过这里。
+    """
+    from .index import drop_chunks_by_ref  # 局部导入避免循环
+
+    marks = ",".join("?" * len(repo_ids))
+    aids = [
+        r["analysis_id"]
+        for r in conn.execute(
+            "SELECT analysis_id FROM analyses WHERE repo_id IN (" + marks + ")", repo_ids
+        ).fetchall()
+    ]
+    # features / cards 两张表都没有 repo_id 列，只能经 analyses 二跳反查；
+    # 写成 WHERE analysis_id IN (repo_ids) 会永远查到空集（两个命名空间不同），
+    # 那就让所有旧块都活到重建之后 —— 表现为「换了模型但召回没变」，且零报错。
+    fid_qmarks = ",".join("?" * len(aids)) if aids else "''"
+    fids = [
+        r["feature_id"]
+        for r in conn.execute(
+            "SELECT feature_id FROM features WHERE analysis_id IN (" + fid_qmarks + ")", aids
+        ).fetchall()
+    ] if aids else []
+    cid_qmarks = ",".join("?" * len(fids)) if fids else "''"
+    cids = [
+        r["card_id"]
+        for r in conn.execute(
+            "SELECT card_id FROM cards WHERE feature_id IN (" + cid_qmarks + ")", fids
+        ).fetchall()
+    ] if fids else []
+
+    by_ref = 0
+    for kind, ids in (
+        ("feature", fids),
+        ("card", cids),
+        ("report_section", aids),
+    ):
+        by_ref += drop_chunks_by_ref(conn, kind, ids)
+
+    # 按 repo_id 再扫一遍：抓孤儿块与任何 ref 已经不在表里的残留
+    rows = conn.execute(
+        "SELECT chunk_id FROM chunks WHERE repo_id IN (" + marks + ")", repo_ids
+    ).fetchall()
+    stale = [r["chunk_id"] for r in rows]
+    for cid in stale:
+        conn.execute("DELETE FROM chunk_vectors WHERE chunk_id = ?", (cid,))
+        conn.execute("DELETE FROM chunk_fts WHERE chunk_id = ?", (cid,))
+        conn.execute("DELETE FROM chunks WHERE chunk_id = ?", (cid,))
+    return [("by_ref", by_ref), ("by_repo_id", len(stale))]
+
+
+def _mismatched_repos(conn: sqlite3.Connection, model: str) -> list[str]:
+    """索引里还挂着别的 embedder 标识的仓库（分仓重建后必报，G11 混模型守卫）。
+
+    只按 analyses 反查落库的仓：`chunk_vectors` 里可能残留已 forget 的块，
+    那些块不算「某个仓的索引」，报出来只会吓人。
+    """
+    return sorted(
+        r["repo_id"]
+        for r in conn.execute(
+            "SELECT DISTINCT a.repo_id FROM chunk_vectors v "
+            "JOIN chunks c ON c.chunk_id = v.chunk_id "
+            "JOIN analyses a ON a.analysis_id = c.ref_id "
+            "WHERE v.embedder <> ?",
+            (model,),
+        ).fetchall()
+    )
+
+
+def reindex(
+    paths: Paths,
+    *,
+    embedder_spec: str | None = None,
+    repo_ids: list[str] | None = None,
+    recluster_after: bool = True,
+) -> dict[str, Any]:
+    """重建索引（R 层）。`repo_ids` 为 None = 整层清空重建；给了则只重建这些仓。
 
     覆盖范围是 `_REINDEXABLE_STATUSES` 的全集：agent 提交与 VibeCraft 回填
     **都写 `committed`**（来源由 producer 区分，不用 status 区分）。派生表被清空后若漏筛某条，
     它的索引就再也回不来（V5 审计 BUG-1），故选不中任何已落库分析时显式报错，
     不静默产出空索引。
+
+    分仓重建（P1-4）的三条约束见 `operations.md` §5.3：按 ref 反查删块、
+    跨仓 pattern 块要重聚、以及必须报出 `embedder_mismatch_repos`。
     """
     from ..embeddings import get_embedder
-    from .index import index_analysis
+    from .index import index_analysis, set_chunk_repo
 
     conn = connect(paths.db)
     try:
@@ -449,27 +538,71 @@ def reindex(paths: Paths, *, embedder_spec: str | None = None) -> dict[str, Any]
         # 「报了错但索引已经没了」——正是零假成功要避免的形状。
         _assert_reindex_covers_all(conn)
         emb = get_embedder(embedder_spec or _meta_get(conn, "embedder"))
-        for t in ("chunk_vectors", "chunk_fts", "chunks"):
-            conn.execute(f"DELETE FROM {t}")
-        n_chunks = 0
-        placeholders = ",".join("?" * len(_REINDEXABLE_STATUSES))
+
+        # 两分支都要在 return 里报出来，先给默认值：全量路径不按仓删块。
+        found: list[str] | None = None
+        dropped: list[tuple[str, int]] = []
+        if not repo_ids:
+            for t in ("chunk_vectors", "chunk_fts", "chunks"):
+                conn.execute(f"DELETE FROM {t}")
+            where = "status IN (" + ",".join("?" * len(_REINDEXABLE_STATUSES)) + ")"
+            params: list[Any] = list(_REINDEXABLE_STATUSES)
+        else:
+            marks = ",".join("?" * len(repo_ids))
+            found = sorted(
+                r["repo_id"]
+                for r in conn.execute(
+                    "SELECT repo_id FROM repos WHERE repo_id IN (" + marks + ")", repo_ids
+                ).fetchall()
+            )
+            missing = sorted(set(repo_ids) - set(found))
+            if missing:
+                # 静默跳过不存在的仓 = 假装重建过了。显式报错，且**在动任何块之前**。
+                raise MemexError(
+                    "not_found",
+                    "指定的部分仓库不存在，未做任何重建",
+                    {"missing_repos": missing, "found": found},
+                )
+
+            dropped = _drop_repo_chunks(conn, found)
+            where = (
+                "repo_id IN (" + marks + ") AND status IN ("
+                + ",".join("?" * len(_REINDEXABLE_STATUSES))
+                + ")"
+            )
+            params = [*found, *_REINDEXABLE_STATUSES]
+
         rows = conn.execute(
-            "SELECT analysis_id, report_md FROM analyses WHERE status IN (" + placeholders + ")",
-            _REINDEXABLE_STATUSES,
+            "SELECT analysis_id, repo_id, report_md FROM analyses WHERE " + where, params
         ).fetchall()
+        n_chunks = 0
         for r in rows:
             res = index_analysis(conn, emb, r["analysis_id"], report_md=r["report_md"])
-            set_repo = conn.execute(
-                "SELECT repo_id FROM analyses WHERE analysis_id = ?", (r["analysis_id"],)
-            ).fetchone()
-            if set_repo:
-                from .index import set_chunk_repo
-
-                set_chunk_repo(conn, set_repo["repo_id"])
+            set_chunk_repo(conn, r["repo_id"])
             n_chunks += res["chunks"]
+
+        # pattern 块是跨仓的：某仓换模型后它的 card 向量与现存 pattern 向量不同源，
+        # 相似度失真。故分仓重建也要重跑一次聚类（只读现存向量，重算自己的块）。
+        reclustered: dict[str, Any] | None = None
+        if repo_ids and recluster_after:
+            from ..core import Config
+            from ..patterns.cluster import recluster
+
+            reclustered = recluster(conn, Config.from_env())
+
         _meta_set(conn, "embedder", emb.model)
         _meta_set(conn, "dim", str(emb.dim))
-        return {"analyses": len(rows), "chunks": n_chunks, "embedder": emb.model, "degraded": emb.degraded}
+        return {
+            "analyses": len(rows),
+            "chunks": n_chunks,
+            "embedder": emb.model,
+            "degraded": emb.degraded,
+            "scope": "repos" if repo_ids else "all",
+            "repos": found,
+            "recluster": reclustered,
+            "embedder_mismatch_repos": _mismatched_repos(conn, emb.model),
+            "dropped": dropped,
+        }
     finally:
         conn.close()
 
