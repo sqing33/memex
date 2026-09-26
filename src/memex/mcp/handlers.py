@@ -895,10 +895,27 @@ def _pattern_min_score(rt: Runtime, pattern_id: str) -> float | None:
     return float(row["ms"])
 
 
+def _pattern_languages(rt: Runtime, pattern_id: str) -> list[str]:
+    """簇成员卡片的 language 去重排序。
+
+    为什么不用 repos.language：fetch 路径从不填它（实测 5/5 仓为 NULL），
+    而 cards.language 是报告里 agent 逐卡标定的，有值（rust/kotlin/python/go）。
+    跨语言模式的核心卖点就是这几个仓用了不同语言，这个字段恒空等于契约形同虚设。
+    取不到任何 language 时返回空列表，由调用方按「未知」处理，不猜。
+    """
+    rows = rt.conn.execute(
+        "SELECT DISTINCT c.language AS lg FROM pattern_members pm "
+        "JOIN cards c ON c.card_id = pm.card_id "
+        "WHERE pm.pattern_id = ? AND c.language IS NOT NULL AND c.language != ''"
+        , (pattern_id,)
+    ).fetchall()
+    return sorted(str(r["lg"]) for r in rows)
+
+
 def _pattern_item(rt: Runtime, p: dict[str, Any]) -> dict[str, Any]:
     tags = _json_loads(p.get("tags_json")) or []
     repos = _pattern_repos(rt, p["pattern_id"])
-    langs = sorted({str(r.get("language")) for r in repos if r.get("language")})
+    langs = _pattern_languages(rt, p["pattern_id"])
     intents = _pattern_intents(rt, p["pattern_id"])
     item: dict[str, Any] = {
         "pattern_id": p["pattern_id"],

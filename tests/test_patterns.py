@@ -26,7 +26,7 @@ def test_cluster_cards_pure():
     assert sizes == [1, 2]
 
 
-def _seed_repo_and_card(conn, emb, *, repo_id, identity, group_fork=None, mech="Bounded retry with exponential backoff across all remote calls."):
+def _seed_repo_and_card(conn, emb, *, repo_id, identity, group_fork=None, mech="Bounded retry with exponential backoff across all remote calls.", language=None):
     conn.execute(
         "INSERT INTO repos(repo_id, full_name, url, host, identity_key, fork_of, source) VALUES(?,?,?,?,?,?,?)",
         (repo_id, repo_id.replace("__", "/"), "https://x/" + repo_id, "github.com", identity, group_fork, "fetch"),
@@ -42,9 +42,9 @@ def _seed_repo_and_card(conn, emb, *, repo_id, identity, group_fork=None, mech="
                  (fid, aid, "f", "T", "S", 0))
     cid = "card_" + repo_id
     conn.execute(
-        "INSERT INTO cards(card_id, feature_id, kind, reusable, title, summary, mechanism_desc, code_spans_json) "
-        "VALUES(?,?,?,?,?,?,?,?)",
-        (cid, fid, "mechanism", 1, "Retry", "S", mech, "[]"),
+        "INSERT INTO cards(card_id, feature_id, kind, reusable, title, summary, mechanism_desc, language, code_spans_json) "
+        "VALUES(?,?,?,?,?,?,?,?,?)",
+        (cid, fid, "mechanism", 1, "Retry", "S", mech, language, "[]"),
     )
     vec = emb.embed_one(mech)
     conn.execute("INSERT INTO chunks(chunk_id, kind, ref_id, card_id, text) VALUES(?,?,?,?,?)",
