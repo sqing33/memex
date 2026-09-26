@@ -161,7 +161,9 @@ _PATTERNS = """## 模式（pattern）是什么
 
 ### 怎么形成
 - 在**可复用卡片**（`reusable:true`）的 `mechanism_desc` 向量上做相似度聚类
-  （默认阈值 0.75，union-find 贪心）。
+  （默认阈值 0.60，贪心 complete-linkage）。complete-linkage 要求新成员与**簇内每一个**
+  已有成员都达标，不靠传递闭包拉人——连通分量会在 0.45 以下把 22/27 张不相关卡
+  吸进一个假模式（实测见 decisions.md G24）。
 - **只保留覆盖 >=2 个不同来源的簇**（`min_repos=2`）。来源按
   `COALESCE(fork_of, identity_key)` 去重——fork 不算独立来源，避免同一血统刷计数。
 - 每次 `commit_report` 后、以及 `forget_*` 后自动重跑聚类（幂等）。

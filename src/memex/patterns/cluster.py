@@ -9,7 +9,15 @@ min_repos 语义（G10）。
 产出：patterns / pattern_members / pattern_intents，并 upsert pattern 块
 （key='pat:<key>'，text = 成员 mechanism_desc 用 '; ' 拼接并按 unit 截断到 60）。
 
-算法：并查集 + 贪心相似度合并（V1 规模足够；V4 再做质量实验）。阈值默认 0.75。
+算法：贪心 complete-linkage 聚类（G24 定案）。
+
+成员判据：新卡要并入某簇，必须与该簇**每一个**已有成员的余弦相似度都 >= threshold，
+否则另起新簇。complete-linkage 语义消除了并查集连通分量的传递闭包——后者会让
+A~B、B~C 达标就把 cos(A,C) 远低于阈值的 C 拖进同一簇。
+
+阈值 0.60 由 V1 实测定（G24）。两组独立测量落在同一个分离带 0.461–0.611：真同机制
+下界 0.611（语料配对与标注探针一致），噪声上界 0.584（语料）/ 0.461（探针），跨仓 p97=0.503。
+0.75 不可达（只命中正样本 1/5），会系统性漏掉真模式。理由与数据见 decisions.md G24。
 """
 
 from __future__ import annotations
@@ -21,7 +29,7 @@ from typing import Any
 from ..core import Config, count_units
 from ..embeddings import Embedder, cosine, unpack_vector
 
-DEFAULT_SIM_THRESHOLD = 0.75
+DEFAULT_SIM_THRESHOLD = 0.60  # G24 实测定值（decisions.md）
 MIN_REPOS = 2  # 语义过滤器，不可调参（solution-analysis）
 
 __all__ = ["cluster_cards", "recluster", "pattern_chunk_text", "DEFAULT_SIM_THRESHOLD", "MIN_REPOS"]
@@ -35,9 +43,14 @@ def _source_group(conn: sqlite3.Connection, repo_id: str) -> str:
 
 
 def _load_cards(conn: sqlite3.Connection, embedder: Embedder) -> list[dict[str, Any]]:
-    """载入可复用卡片 + 其向量 + 所属 repo（经 feature -> analysis -> repo 回溯）。"""
+    """载入可复用卡片 + 其向量 + 所属 repo（经 feature -> analysis -> repo 回溯）。
+
+    按 card_id 排序返回：贪心聚类以输入顺序为确定性来源，SQLite 的无 ORDER BY
+    查询不保证行序，不排序就无法保证同库重跑得同一批模式。
+    """
     rows = conn.execute(
-        "SELECT card_id, feature_id, title, mechanism_desc FROM cards WHERE reusable = 1"
+        "SELECT card_id, feature_id, title, mechanism_desc FROM cards WHERE reusable = 1 "
+        "ORDER BY card_id"
     ).fetchall()
     out: list[dict[str, Any]] = []
     for c in rows:
@@ -116,32 +129,27 @@ def pattern_chunk_text(members: list[dict[str, Any]], *, max_units: int) -> str:
 def cluster_cards(
     cards: list[dict[str, Any]], *, threshold: float = DEFAULT_SIM_THRESHOLD
 ) -> list[list[dict[str, Any]]]:
-    """并查集贪心聚类：两卡相似度 >= threshold 则合并。返回簇列表。"""
-    n = len(cards)
-    parent = list(range(n))
+    """贪心 complete-linkage 聚类，返回簇列表。
 
-    def find(x: int) -> int:
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
+    依次取卡，为它寻找一个**全部成员**相似度都 >= threshold 的已有簇并入之；
+    找不到则自成新簇。
 
-    def union(a: int, b: int) -> None:
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[rb] = ra
+    成员判据取全连接（complete-linkage）而非「与簇内任一成员相似」：后者等价于
+    连通分量的传递闭包，A~B 与 B~C 达标就会把 cos(A,C) 很低的 C 一起拖进来。
+    Doraemon + PTNexus 实测（27 张可复用卡）：阈值 0.50 时并查集给出 11/6 两簇，
+    complete-linkage 最大簇只有 3。
 
-    for i in range(n):
-        for j in range(i + 1, n):
-            if find(i) == find(j):
-                continue
-            if cosine(cards[i]["vec"], cards[j]["vec"]) >= threshold:
-                union(i, j)
-
-    groups: dict[int, list[dict[str, Any]]] = {}
-    for i, card in enumerate(cards):
-        groups.setdefault(find(i), []).append(card)
-    return list(groups.values())
+    顺序即确定性来源：调用方按 card_id 排序传入，同输入必得同输出。
+    """
+    clusters: list[list[dict[str, Any]]] = []
+    for card in cards:
+        for cluster in clusters:
+            if all(cosine(card["vec"], member["vec"]) >= threshold for member in cluster):
+                cluster.append(card)
+                break
+        else:
+            clusters.append([card])
+    return clusters
 
 
 def _keep(cluster: list[dict[str, Any]], groups_by_repo: dict[str, str]) -> bool:
@@ -156,7 +164,8 @@ def recluster(conn: sqlite3.Connection, cfg: Config, *, threshold: float = DEFAU
     cards = _load_cards(conn, _embedder_for(conn))
     groups_by_repo = {r["repo_id"]: _source_group(conn, r["repo_id"]) for r in conn.execute("SELECT repo_id FROM repos").fetchall()}
 
-    clusters = [c for c in cluster_cards(cards, threshold=threshold) if _keep(c, groups_by_repo)]
+    all_clusters = cluster_cards(cards, threshold=threshold)
+    clusters = [c for c in all_clusters if _keep(c, groups_by_repo)]
 
     # 清空派生层（可重算）：先清 pattern 块，再清派生表
     for r in conn.execute("SELECT chunk_id FROM chunks WHERE kind = 'pattern'").fetchall():
@@ -206,7 +215,7 @@ def recluster(conn: sqlite3.Connection, cfg: Config, *, threshold: float = DEFAU
         put_chunks(conn, _embedder_for(conn), chunk_rows)
     return {
         "patterns": patterns_written,
-        "clusters_seen": len(cluster_cards(cards, threshold=threshold)),
+        "clusters_seen": len(all_clusters),
         "cards_considered": len(cards),
         "chunks": len(chunk_rows),
         "threshold": threshold,

@@ -648,5 +648,6 @@ resources·prompts）**已定案**，落为 [`mcp-tools.md`](mcp-tools.md)、[`r
 [`report-contract.md`](report-contract.md)、[`operations.md`](operations.md)，
 决策理由见 [`decisions.md`](decisions.md) **G 组**。
 
-仅剩**第 4 批** 4 项（质量阈值、聚类阈值、rerank 选型、远程会话清扫）**全部待实测**，逐条列在 [`gaps.md`](gaps.md)，
+第 4 批的 **G24 聚类阈值已定案**（`0.60` + 贪心 complete-linkage，见 [`decisions.md`](decisions.md) G24），
+仅剩 3 项（质量阈值、rerank 选型、远程会话清扫）**待实测**，逐条列在 [`gaps.md`](gaps.md)，
 含证据位置、可选方案、我的建议与阻塞度分级。**定案后继续追加为 `decisions.md` 的 G 组。**

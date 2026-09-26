@@ -83,3 +83,34 @@ def test_fork_does_not_count_as_second_source(tmp_path, monkeypatch):
     _seed_repo_and_card(conn, emb, repo_id="github.com__b__b", identity="github.com#b/b", group_fork="github.com#a/a")
     res = recluster(conn, cfg, threshold=0.5)
     assert res["patterns"] == 0, res
+
+
+def test_cluster_cards_no_transitive_absorption():
+    """G24 回归：A~B 与 B~C 达标但 A~C 不达标时，三者不得并成一簇。
+
+    并查集连通分量按传递闭包合并，A~B、B~C 达标就会把 cos(A,C) 只有 0.5 的
+    C 也拖进簇。
+    """
+    # 单位圆上相隔 60 度：A 与 B 夹角 30 度、B 与 C 夹角 30 度、A 与 C 夹角 60 度
+    cards = [
+        {"card_id": "a", "vec": [1.0, 0.0], "title": "A"},
+        {"card_id": "b", "vec": [0.8660254, 0.5], "title": "B"},
+        {"card_id": "c", "vec": [0.5, 0.8660254], "title": "C"},
+    ]
+    # cos(A,B)=0.866  cos(B,C)=0.866  cos(A,C)=0.5  阈值 0.8
+    clusters = cluster_cards(cards, threshold=0.8)
+    sizes = sorted(len(c) for c in clusters)
+    assert sizes == [1, 2], sizes
+
+
+def test_cluster_cards_is_deterministic():
+    """同输入必须同输出：greedy 按输入顺序选簇，不依赖哈希或集合顺序。"""
+    cards = [
+        {"card_id": "a", "vec": [1.0, 0.0], "title": "A"},
+        {"card_id": "b", "vec": [0.0, 1.0], "title": "B"},
+        {"card_id": "c", "vec": [1.0, 0.0], "title": "C"},
+    ]
+    one = sorted(sorted(c["card_id"] for c in cl) for cl in cluster_cards(cards, threshold=0.9))
+    two = sorted(sorted(c["card_id"] for c in cl) for cl in cluster_cards(list(cards), threshold=0.9))
+    assert one == two
+    assert one == [["a", "c"], ["b"]]
