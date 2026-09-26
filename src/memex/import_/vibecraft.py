@@ -754,9 +754,19 @@ def _persist_analysis(conn: sqlite3.Connection, payload: dict[str, Any]) -> None
     """
     repo = payload["repo"]
     conn.execute(
-        "INSERT OR REPLACE INTO repos(repo_id, full_name, url, host, description, language, "
+        # 不用 INSERT OR REPLACE：REPLACE 是「删旧行再插新行」，列清单里没写的列
+        # 会回到默认值——fork_of / aliases_json / merged_into 会被悄悄抹成空，
+        # 于是「回填一次就把 fetch 阶段查到的身份关系扔了」。改成 upsert，
+        # 身份列一个都不碰（P1-2 / G10）。
+        "INSERT INTO repos(repo_id, full_name, url, host, description, language, "
         "identity_key, source, is_stale, is_fork, is_local) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(repo_id) DO UPDATE SET "
+        "full_name=excluded.full_name, url=excluded.url, host=excluded.host, "
+        "description=COALESCE(excluded.description, repos.description), "
+        "language=COALESCE(excluded.language, repos.language), "
+        "identity_key=excluded.identity_key, source=excluded.source, "
+        "is_stale=excluded.is_stale, is_local=excluded.is_local",
         (repo["repo_id"], repo["full_name"], repo["url"], repo["host"], repo["description"],
          repo["language"], repo["identity_key"], "local", 0, 0, 1),
     )

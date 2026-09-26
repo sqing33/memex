@@ -105,6 +105,7 @@ DDL_STATEMENTS: tuple[str, ...] = (
         aliases_json   TEXT NOT NULL DEFAULT '[]',
         fork_of        TEXT,
         is_fork        INTEGER NOT NULL DEFAULT 0,
+        merged_into    TEXT,                           -- G10：改名/转移后并入的既有 repo_id
         source         TEXT NOT NULL DEFAULT 'fetch',
         is_stale       INTEGER NOT NULL DEFAULT 0,
         head_sha       TEXT,
@@ -259,6 +260,7 @@ def create_schema(conn: sqlite3.Connection) -> None:
 # 列级增量迁移：为既有库补上后加的列（幂等）。值 = (表, 列, 列定义)。
 _COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("analyses", "reindex_state", "TEXT NOT NULL DEFAULT 'indexed'"),
+    ("repos", "merged_into", "TEXT"),
 )
 
 

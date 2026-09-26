@@ -237,6 +237,8 @@ class Config:
     git_tokens: dict[str, str] = field(default_factory=dict)
     git_mirror: str = ""
     allow_local_paths: bool = True
+    # 抓取时是否打宿主元数据 API（G10 写侧：identity_key / fork_of / stars / license）
+    host_meta: bool = True
     clone_timeout: int = 300
     clone_concurrency: int = 3
     # 护栏（G5 / G7 / G16）
@@ -295,6 +297,7 @@ class Config:
             git_tokens=tokens,
             git_mirror=e.get("MEMEX_GIT_MIRROR", ""),
             allow_local_paths=_env_bool("MEMEX_ALLOW_LOCAL_PATHS", not is_http),
+            host_meta=_env_bool("MEMEX_HOST_META", True),
             clone_timeout=_env_int("MEMEX_CLONE_TIMEOUT", 300),
             clone_concurrency=_env_int("MEMEX_CLONE_CONCURRENCY", 3),
             max_file_bytes=_env_int("MEMEX_MAX_FILE_BYTES", 1_048_576),

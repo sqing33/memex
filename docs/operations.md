@@ -23,6 +23,7 @@
 |---|---|---|
 | `MEMEX_GIT_HOSTS` | `github.com,gitlab.com,gitee.com` | 宿主白名单；不在其中 → `unsupported` |
 | `MEMEX_GIT_TOKEN__<host>` | 空 | 私有仓凭据，host 里的 `.` 换成 `_`。例：`MEMEX_GIT_TOKEN__github_com=ghp_…` |
+| `MEMEX_HOST_META` | `on` | 抓取时是否打宿主元数据 API（取 `identity_key` / `fork_of` / `stars` / `license` / `description`）。**开 = 身份可校验**（G10 写侧）；关 = 只按 `owner/name` 判身份并记 warning，fork 字段留空（G6 零假成功：不猜）|
 | `MEMEX_GIT_MIRROR` | 空 | 镜像前缀，如 `https://git-mirror.corp/`；抓取时把 `github.com/<o>/<n>` 重写为 `<mirror><o>/<n>`（G22）。**探测** `git ls-remote <mirror> HEAD`：失败则记 `warnings` 并按原 host **回落直连**。凭据仍按**原始 host** 取（`MEMEX_GIT_TOKEN__github_com`），不按镜像 host |
 | `MEMEX_ALLOW_LOCAL_PATHS` | stdio 下 `true`，`serve-http` 下强制 `false` | 是否允许 `local:` / 裸目录路径（G6） |
 | `MEMEX_CLONE_TIMEOUT` | `300` | 秒（G17） |

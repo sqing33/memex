@@ -18,24 +18,70 @@ from typing import Any
 from ..core import Config, MemexError, Paths, RepoRef, parse_repo_url
 from ..fsutil import sha256_file
 from ..store.db import json_dumps, json_loads, utcnow
-from .detect import detect_language
 from . import gitutil
+from .detect import detect_language
+from .hostmeta import HostMeta, fetch_host_meta
 
 # 克隆并发闸（G7：max 3）。stdio 单进程即可生效；serve-http 由线程共享。
 _CLONE_GATE = threading.Semaphore(3)
 
 
-def _identity_key(ref: RepoRef) -> tuple[str, str | None]:
-    """身份键：优先 host#<numeric id>，无 API 时退化为 host#owner/name（G10）。
+def _merge_renamed(
+    conn: sqlite3.Connection,
+    cfg: Config,
+    *,
+    owner: sqlite3.Row,
+    ref: RepoRef,
+    identity_key: str,
+    head_sha: str | None,
+    language: str | None,
+    meta: HostMeta,
+) -> dict[str, Any]:
+    """改名/转移后的合并：沿用既有 repo_id，旧名进 aliases_json。
 
-    V1 不打 host 元数据 API，因此总是走 fallback —— 返回警告文本让上层透出。
+    只动 repos 一行，绝不碰 analyses / features / cards / chunks——
+    历史分析保留在原 repo_id 下，这是 G10 的原意。
     """
-    key = f"{ref.host}#{ref.owner}/{ref.name}"
-    warning = (
-        "未能获取稳定数字 ID，identity_key 退化为 owner/name；"
-        "仓库改名会被视为新仓库（G10）"
+    target_id = owner["repo_id"]
+    old_names = json_loads(owner["aliases_json"], [])
+    if owner["full_name"] and owner["full_name"] != ref.full_name:
+        old_names = [n for n in old_names if n != owner["full_name"]]
+        old_names.append(owner["full_name"])
+    stale = bool(owner["head_sha"] and head_sha and owner["head_sha"] != head_sha)
+    conn.execute(
+        "UPDATE repos SET full_name = ?, url = ?, host = ?, language = ?, head_sha = ?, "
+        "aliases_json = ?, is_stale = CASE WHEN ? THEN 1 ELSE is_stale END, "
+        "stars = COALESCE(?, stars), license = COALESCE(?, license), "
+        "description = COALESCE(?, description) "
+        "WHERE repo_id = ?",
+        (
+            ref.full_name, ref.url, ref.host, language, head_sha, json_dumps(old_names),
+            int(stale), meta.stars, meta.license, meta.description, target_id,
+        ),
     )
-    return key, warning
+    row = get_repo(conn, target_id)
+    assert row is not None
+    return {
+        "repo": repo_summary(row),
+        "is_new": False,
+        "repo_path": None,
+        "merged_into": target_id,
+        "renamed_from": owner["full_name"],
+        "aliases": old_names,
+        "warnings": [
+            f"仓库已改名为 {ref.full_name}：沿用既有 repo_id {target_id}，历史分析保持不变"
+        ] + (["检测到新的提交，既有分析已标记 stale，需重新分析"] if stale else []),
+    }
+
+
+def _host_meta(cfg: Config, ref: RepoRef) -> HostMeta:
+    """查宿主元数据；关掉开关或查不到时返回一个「什么都没查到」的实例。
+
+    返回值永远不是 None，调用方不必到处判空——「查不到」本身就是一种合法结果。
+    """
+    if not cfg.host_meta:
+        return HostMeta(reason="MEMEX_HOST_META=off：身份按 owner/name 判定，未校验")
+    return fetch_host_meta(cfg, ref)
 
 
 def _repo_dir(cfg: Config, repo_id: str) -> Path:
@@ -62,6 +108,8 @@ def repo_summary(row: dict[str, Any], *, analyzed_sha: str | None = None) -> dic
         "is_stale": bool(row.get("is_stale")),
         "is_fork": bool(row.get("is_fork")),
         "fork_of": row.get("fork_of"),
+        "merged_into": row.get("merged_into"),
+        "aliases": json_loads(row.get("aliases_json"), []),
         "subpath": row.get("subpath"),
         "source": row.get("source"),
         "cloned_at": row.get("cloned_at"),
@@ -85,28 +133,58 @@ def _upsert_repo(
     is_local: bool,
     language: str | None,
     aliases: list[str] | None = None,
+    is_fork: bool = False,
+    fork_of: str | None = None,
+    stars: int | None = None,
+    license: str | None = None,
+    description: str | None = None,
+    merged_into: str | None = None,
 ) -> None:
     """写入或更新 repos 行。
-    已存在的 aliases_json / fork_of / is_fork **不在** UPDATE 列表里，故被保留；
+
+    **别名 / fork 关系是只增不减的**（G10）：旧名的轨迹一旦记下就不该被下一次 fetch 抹掉，
+    所以 aliases_json 传 None 表示「沿用库里已有的」，只有显式传列表才覆盖。
+    fork_of / is_fork / stars / license / description 则是**快照**：宿主说有就写，
+    宿主说「没查到」（None）就沿用旧值而不是清空——把「不知道」写成「没有」是假信号。
+
     language 每次按克隆目录重新统计（换 embedder 或 reindex 后仍与真实内容一致）。
     """
-    existing = conn.execute("SELECT aliases_json FROM repos WHERE repo_id = ?", (repo_id,)).fetchone()
-    aliases_json = json_dumps(aliases if aliases is not None else json_loads(
-        existing["aliases_json"] if existing else None, []))
+    existing = conn.execute(
+        "SELECT aliases_json, is_fork, fork_of, stars, license, description, merged_into "
+        "FROM repos WHERE repo_id = ?",
+        (repo_id,),
+    ).fetchone()
+    if aliases is None:
+        aliases = json_loads(existing["aliases_json"] if existing else None, [])
+    # 新值为 None（宿主这次没给）就保留库里已知的，只有宿主明确说了新值才覆盖。
+    # 代价：仓库若真的从 fork 变回上游，本函数不会自动把 fork_of 清空——
+    # 这比反向误判（把上游当成 fork 去重掉）安全得多，宁可留旧值让人看见。
+    fork_of = fork_of if fork_of is not None else (existing["fork_of"] if existing else None)
+    stars = stars if stars is not None else (existing["stars"] if existing else None)
+    license = license if license is not None else (existing["license"] if existing else None)
+    description = (
+        description if description is not None else (existing["description"] if existing else None)
+    )
+    merged_into = merged_into if merged_into is not None else (
+        existing["merged_into"] if existing else None
+    )
     conn.execute(
         "INSERT INTO repos(repo_id, full_name, url, host, default_branch, language, stars, license, "
-        "description, subpath, identity_key, aliases_json, fork_of, is_fork, source, is_stale, "
-        "head_sha, cloned_at, repo_path, is_local) "
-        "VALUES(?,?,?,?,?,?,NULL,NULL,NULL,?,?,?,NULL,0,?,?,?,?,?,?) "
+        "description, subpath, identity_key, aliases_json, fork_of, is_fork, merged_into, source, "
+        "is_stale, head_sha, cloned_at, repo_path, is_local) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
         "ON CONFLICT(repo_id) DO UPDATE SET "
         "full_name=excluded.full_name, url=excluded.url, host=excluded.host, "
-        "default_branch=excluded.default_branch, subpath=excluded.subpath, " 
-        "language=excluded.language, identity_key=excluded.identity_key, source=excluded.source, " 
+        "default_branch=excluded.default_branch, subpath=excluded.subpath, "
+        "language=excluded.language, identity_key=excluded.identity_key, source=excluded.source, "
         "is_stale=excluded.is_stale, head_sha=excluded.head_sha, "
-        "cloned_at=excluded.cloned_at, repo_path=excluded.repo_path, aliases_json=excluded.aliases_json",
+        "cloned_at=excluded.cloned_at, repo_path=excluded.repo_path, aliases_json=excluded.aliases_json, "
+        "stars=excluded.stars, license=excluded.license, description=excluded.description, "
+        "is_fork=excluded.is_fork, fork_of=excluded.fork_of, merged_into=excluded.merged_into",
         (
-            repo_id, full_name, url, host, default_branch, language, subpath, identity_key,
-            aliases_json, source, int(is_stale), head_sha, utcnow(), repo_path, int(is_local),
+            repo_id, full_name, url, host, default_branch, language, stars, license,
+            description, subpath, identity_key, json_dumps(aliases), fork_of, int(is_fork),
+            merged_into, source, int(is_stale), head_sha, utcnow(), repo_path, int(is_local),
         ),
     )
 
@@ -126,8 +204,9 @@ def ensure_repo(
     """
     repo_id = ref.repo_id
     path = _repo_dir(cfg, repo_id)
-    identity_key, warning = _identity_key(ref)
-    warnings: list[str] = [warning] if warning else []
+    meta = _host_meta(cfg, ref)
+    identity_key, degraded = meta.identity_key(ref)
+    warnings: list[str] = [meta.reason] if degraded and meta.reason else []
     owns = conn is None
     if conn is None:
         from ..store.db import connect
@@ -151,6 +230,25 @@ def ensure_repo(
         is_new = existing is None
         if existing is not None and existing.get("head_sha") and existing["head_sha"] != result.head_sha:
             stale = True  # refresh 发现新 head：已有分析标记 stale，绝不自动重分析
+
+        # 改名/转移：identity_key 命中了另一个 repo_id，说明是同一个仓换了名字。
+        # 沿用既有句柄，目录/chunks/cards 全部不动（G10：历史分析一律保留）。
+        owner = conn.execute(
+            "SELECT repo_id, full_name, head_sha, aliases_json FROM repos " 
+            "WHERE identity_key = ? AND repo_id <> ?",
+            (identity_key, repo_id),
+        ).fetchone()
+        if owner is not None and not degraded:
+            return _merge_renamed(
+                conn,
+                cfg,
+                owner=owner,
+                ref=ref,
+                identity_key=identity_key,
+                head_sha=result.head_sha,
+                language=detect_language(result.repo_path),
+                meta=meta,
+            )
         _upsert_repo(
             conn,
             repo_id=repo_id,
@@ -166,6 +264,11 @@ def ensure_repo(
             is_stale=stale or bool(existing and existing.get("is_stale")),
             language=detect_language(result.repo_path),
             is_local=False,
+            is_fork=bool(meta.fork),
+            fork_of=meta.fork_of,
+            stars=meta.stars,
+            license=meta.license,
+            description=meta.description,
         )
         row = get_repo(conn, repo_id)
         assert row is not None
@@ -239,7 +342,8 @@ def upload_repo_bundle(
         conn = connect(str(Paths(cfg.home).db))
     try:
         result = gitutil.clone_from_bundle(cfg, p, dest)
-        identity_key, warning = _identity_key(parsed)
+        meta = _host_meta(cfg, parsed)
+        identity_key, degraded = meta.identity_key(parsed)
         _upsert_repo(
             conn,
             repo_id=repo_id,
@@ -255,6 +359,11 @@ def upload_repo_bundle(
             is_stale=False,
             language=detect_language(result.repo_path),
             is_local=False,
+            is_fork=bool(meta.fork),
+            fork_of=meta.fork_of,
+            stars=meta.stars,
+            license=meta.license,
+            description=meta.description,
         )
         row = get_repo(conn, repo_id)
         assert row is not None
@@ -264,7 +373,7 @@ def upload_repo_bundle(
             "bytes": size,
             "repo_path": result.repo_path if cfg.allow_local_paths else None,
             "is_new": True,
-            "warnings": [warning] if warning else [],
+            "warnings": [meta.reason] if degraded and meta.reason else [],
         }
     finally:
         if owns:

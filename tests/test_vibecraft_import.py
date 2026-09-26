@@ -14,6 +14,7 @@ import pytest
 
 from memex.core import Config, Paths
 from memex.import_ import vibecraft
+from memex.store import db as store_db
 
 
 def _make_source_db(path: Path, repo_key: str, repo_root: Path) -> None:
@@ -199,6 +200,50 @@ def test_vibecraft_import_is_searchable_without_reindex(tmp_path: Path) -> None:
     finally:
         conn.close()
 
+
+def test_vibecraft_import_preserves_fork_and_alias_relations(tmp_path: Path) -> None:
+    """P1-2：回填不该抹掉 fetch 阶段写入的身份关系。
+
+    此前用 INSERT OR REPLACE 写 repos，而 REPLACE 语义是「删旧行再插新行」：
+    列清单里没写的 fork_of / aliases_json / merged_into 全回到默认值，
+    于是回填一次就把 G10 写侧刚查到的 fork 关系、别名轨迹、合并指向抹成空——
+    跨仓去重（COALESCE(fork_of, identity_key)）随之失效且无任何报错。
+    """
+    paths, src_db = _setup(tmp_path)
+    # 先建表再种数据：import_vibecraft 自己会建库，但这里要提前往 repos 里塞关系
+    store_db.init_db(paths, embedder_spec="hash:64")
+    conn = sqlite3.connect(str(paths.db))
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute(
+            "INSERT INTO repos(repo_id, full_name, url, host, identity_key, source, "
+            "is_fork, fork_of, aliases_json, merged_into) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            ("github.com__demo__widget", "demo/widget", "https://github.com/demo/widget",
+             "github.com", "github.com#424242", "clone", 1, "demo/upstream",
+             '["demo/oldname"]', "github.com__demo__upstream"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    vibecraft.import_vibecraft(paths=paths, path=str(src_db))
+
+    row = _rows(paths, "SELECT is_fork, fork_of, aliases_json, merged_into "
+               "FROM repos WHERE repo_id = ?", "github.com__demo__widget")[0]
+    assert bool(row["is_fork"]) is True, "回填把 is_fork 抹成了 0——fork 关系没了"
+    assert row["fork_of"] == "demo/upstream", "回填把 fork_of 抹成了空"
+    assert row["aliases_json"] == '["demo/oldname"]', "回填把别名轨迹抹成了 []"
+    assert row["merged_into"] == "github.com__demo__upstream", "回填把合并指向抹成了空"
+
+
+def test_vibecraft_import_does_not_duplicate_repo_row(tmp_path: Path) -> None:
+    """改 upsert 后，仓已经存在也不该多出一行（INSERT OR REPLACE 时代的既有行为）。"""
+    paths, src_db = _setup(tmp_path)
+    vibecraft.import_vibecraft(paths=paths, path=str(src_db))
+    vibecraft.import_vibecraft(paths=paths, path=str(src_db))
+    n = _rows(paths, "SELECT COUNT(*) FROM repos WHERE repo_id = ?",
+              "github.com__demo__widget")
+    assert n[0][0] == 1, "回填两次后仓行数应仍为 1，实际 " + str(n[0][0])
 
 def _rows_count(conn: sqlite3.Connection, sql: str) -> int:
     return int(conn.execute(sql).fetchone()[0])

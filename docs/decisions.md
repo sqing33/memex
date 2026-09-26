@@ -621,6 +621,28 @@ forget_repo(repo_id, confirm: true)           # 级联删其上全部 analysis +
 
 ---
 
+#### G10 写侧落地（V5 P0-3 / P0-4 补记）
+
+上面这三条决定此前**只有读侧**：`patterns/cluster.py` 的 `source_group = COALESCE(fork_of, identity_key)` 一直正确，但 `repos.fork_of` / `is_fork` / `aliases_json` 的**写侧从未有过一条代码路径**——`_upsert_repo` 把三列写死 NULL / 0 / `[]`。
+
+所以「fork 也能被去重」当时成立的前提是「fork 关系由别的途径填好」，而它并不成立。补上写侧：
+
+**`MEMEX_HOST_META=on`（默认开）打宿主元数据 API**，一次拿到五件事：
+
+| 取值 | 落哪 | 用途 |
+|---|---|---|
+| `GET /repos/{o}/{n}` 的 `id` | `identity_key` = `host#<数字 id>` | 改名/转移不变的真锚（P1-1 落地）|
+| `fork` + `parent.full_name` | `is_fork` / `fork_of` | fork 写侧，读侧立刻生效（原来恒为 `false` / `null`）|
+| `stargazers_count` / `license.spdx_id` / `description` | `stars` / `license` / `description` | P2-1 剩余三列，站点不再是 em-dash |
+
+**改名/转移的合并**（`merged_into`，新列）：`fetch_repo` 算完 `identity_key` 后先查该键是否已属**别的** `repo_id` → 命中则**沿用既有 repo_id**（目录、chunks、cards 全不动），`full_name` 更新、旧名进 `aliases_json`，并在返回体给 `merged_into`。历史分析一律保留（不删、不重挂），符合原决定。
+
+**`MEMEX_HOST_META=off` 时**：`identity_key` 退回 `host#owner/name`，`warnings` 明确写「身份未校验」，**不**自动合并、**不**猜 fork——宁可字段空着也不能编一个（零假成功）。原决定的「无 API 时不做自动合并（保守）」在这里被保留成显式的关卡形态，而不是靠「没实现」蒙混。
+
+**为什么元数据失败不阻断 fetch**：网络/限流/无凭据都会让元数据调用失败，但仓库本身照样能 clone。此时**降级到 `host#owner/name` + 记 warning**，让内容可分析；但 fork 字段**留空**而不是填「非 fork」——把「不知道」写成「不是」正是本项目最拒绝的那类假信号。
+
+**残余风险**：`git clone` 已经能用 `MEMEX_GIT_TOKEN__<host>` 拿私有仓凭据，元数据 API 复用同一份 token，故私有仓也能取到身份；但宿主只实现了 GitHub 一家（GitLab / Gitee 的 API 路径不同，未实现即走 fallback 并如实记 warning，★ 不是静默假装成功）；`source_group` 在 fork_of 为空时退化为 identity_key 自身，故 `MEMEX_HOST_META=off` 时 fork 去重能力确实失效——这是显式取舍，不是 bug。
+
 ### ✔ G12. 从 VibeCraft 回填
 
 **决定：`memex import-vibecraft <path>` 做**最佳努力**结构搬运，强制过同一 `validate_report` 与「按真实文件重切」；过不了的卡片**丢弃并计入报告**，不静默降级；产物标 `producer=batch` / `analyst=vibecraft-import`。失败是常态，故 `--dry-run` 必做。**

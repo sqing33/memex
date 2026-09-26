@@ -113,9 +113,11 @@ $MEMEX_HOME/                    （默认 ~/.memex）
         identity_key UQ,                       ← ★ G10：真身份锚（github.com#<数字 id>）
         aliases_json,                          ← ★ G10：历史 full_name 轨迹
         fork_of, is_fork,                      ← ★ G10：fork 上游全名 / 是否 fork
+        merged_into,                           ← ★ G10：改名/转移后并入的既有 repo_id
         source,                                ← ★ G22：'clone' | 'tar' | 'upload' | 'local'
         is_stale, head_sha, cloned_at, repo_path, is_local)
         identity_key: 逐宿主最稳的锚；无 API 时退化为 'host#owner/name' 并记 warnings（G10）
+        merged_into: 非空 = 本行已不是活跃句柄，调用方应改用该 repo_id（G10）
         source:       'upload' = 经 T17 投喂（G22）
 
 ② 分析与产物（每次分析一行）

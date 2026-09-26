@@ -163,6 +163,8 @@
         "is_stale":       { "type": "boolean" },
         "is_fork":        { "type": "boolean", "description": "G10" },
         "fork_of":        { "type": "string",  "description": "G10：上游全名" },
+        "merged_into":    { "type": "string",  "description": "G10：改名/转移后并入的既有 repo_id；非空表示本仓已不是活跃句柄" },
+        "aliases":        { "type": "array", "items": { "type": "string" }, "description": "G10：历史 full_name（改名轨迹）" },
         "subpath":        { "type": "string",  "description": "G15：monorepo 子目录范围" },
         "source":         { "enum": ["clone", "tar", "upload", "local"], "description": "G22：'upload' = 经 T17 投喂" },
         "cloned_at":      { "type": "string" }
