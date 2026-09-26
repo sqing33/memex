@@ -866,6 +866,7 @@ stdio 本地形态下调用它也允许（返回本地文件 `file://` 路径或
           "key":        { "type": "string" },
           "title":      { "type": "string" },
           "tags":       { "type": "array", "items": { "type": "string" } },
+          "min_score":  { "type": "number", "description": "簇内成员最紧的余弦下界（pattern_members.score 的最小值）。V4 实测：该 embedding 判别同机制判别力不足，0.60 阈值下簇精度仅 25%，且无零误报阈值——本字段是把松紧如实交给调用方判断的唯一信号，不设默认门槛" },
           "card_count": { "type": "integer" },
           "repo_count": { "type": "integer" },
           "languages":  { "type": "array", "items": { "type": "string" } },
@@ -879,6 +880,17 @@ stdio 本地形态下调用它也允许（返回本地文件 `file://` 路径或
 ```
 
 **要点**：`repo_count >= 2` 恒成立（`min_repos=2` 是语义过滤器，不是可调项——见 §5.7）。
+
+**`min_score` 必须看（V4 实测后的契约强化）。** `repo_count >= 2` 只保证
+「成员来自不同源仓」，**不保证它们是同一机制**。V4 对 20 个跨仓候选对做人工判定：
+只有 5 对判「同机制」，精度 **25.0%**；同机制对与同主题对在余弦空间里**完全交错**，
+**不存在零误报阈值**（详见 `decisions.md` G24 段）。已落库的 5 个 pattern 里
+只有 1 个含真同机制对。
+
+因此 server **不替调用方假装分得出松紧**，而是把成员最紧余弦如实给出：
+**`title` 是「值得去看的线索」，不是「已证实的机制等价」。** 判定同构与否
+是读卡片的 agent 的判断，不是本工具的输出。**不要因为 `repo_count >= 2`
+就把簇标题当结论引用。**
 
 ### T11 · `get_report` — 取报告
 

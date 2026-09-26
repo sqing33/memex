@@ -878,6 +878,23 @@ def _t9_get_card(rt: Runtime, args: dict[str, Any]) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # T10 list_patterns
 # --------------------------------------------------------------------------- #
+def _pattern_min_score(rt: Runtime, pattern_id: str) -> float | None:
+    """簇内成员 score 的最小值 = 最紧一环的余弦下界（V4 定案）。
+
+    为什么要暴露：V4 对 20 个跨仓候选对做人工判定，0.60 阈值下簇精度仅 25.0%，
+    且同机制对与同主题对在余弦空间里完全交错——不存在零误报阈值
+    （decisions.md G24 段）。也就是说 server 分不出这个簇有多紧。
+    与其静默给一个看起来很确定的簇，不如把最紧余弦如实交给调用方自己筛。
+    零假成功的另一面是零假确定。
+    """
+    row = rt.conn.execute(
+        "SELECT MIN(score) AS ms FROM pattern_members WHERE pattern_id = ?", (pattern_id,)
+    ).fetchone()
+    if row is None or row["ms"] is None:
+        return None
+    return float(row["ms"])
+
+
 def _pattern_item(rt: Runtime, p: dict[str, Any]) -> dict[str, Any]:
     tags = _json_loads(p.get("tags_json")) or []
     repos = _pattern_repos(rt, p["pattern_id"])
@@ -890,6 +907,9 @@ def _pattern_item(rt: Runtime, p: dict[str, Any]) -> dict[str, Any]:
         "repo_count": p["repo_count"],
         "card_count": p["card_count"],
     }
+    min_score = _pattern_min_score(rt, p["pattern_id"])
+    if min_score is not None:
+        item["min_score"] = min_score
     if tags:
         item["tags"] = list(tags)
     if langs:
