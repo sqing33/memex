@@ -91,6 +91,19 @@ def build_card_text(card: dict[str, Any]) -> str:
     return " ".join(parts).strip()
 
 
+def _is_pending(quality_json: Any) -> bool:
+    """这张卡是不是「机制描述待补英文」状态（P1-3 / G12）。
+
+    标记来自 import-vibecraft 写卡时打的 quality_json.pending。
+    读不出、不是布尔、没这个键——一律当**非** pending：闸门只拦「明确标了待补」的卡，
+    宁可放行也不把正常卡片静默剔出索引（那是另一种假信号）。
+    """
+    q = json_loads(quality_json, {}) or {}
+    if not isinstance(q, dict):
+        return False
+    return bool(q.get("pending"))
+
+
 def _card_evidence(conn: sqlite3.Connection, card_id: str) -> list[dict[str, Any]]:
     """取卡片的证据（源码路径 + 符号名），供块文本进 FTS（tech-design §2.2）。"""
     rows = conn.execute(
@@ -172,6 +185,7 @@ def index_analysis(
     rows: list[dict[str, Any]] = []
     ref_ids: list[str] = []
     n_cards = 0
+    n_pending = 0
     # tags 存在 report_json 里（cards 表无 tags 列），按 feature slug + 卡片标题定位
     report = json_loads(
         conn.execute("SELECT report_json FROM analyses WHERE analysis_id = ?", (analysis_id,)).fetchone(),
@@ -203,8 +217,8 @@ def index_analysis(
             "heading": f["title"],
         })
         cards = conn.execute(
-            "SELECT card_id, kind, title, summary, mechanism_desc, language, reusable FROM cards "
-            "WHERE feature_id = ? ORDER BY card_id",
+            "SELECT card_id, kind, title, summary, mechanism_desc, language, reusable, "
+            "quality_json FROM cards WHERE feature_id = ? ORDER BY card_id",
             (fid,),
         ).fetchall()
         # feature 块带上所属卡的标题：搜到 feature 时能顺藤摸到具体机制
@@ -212,6 +226,12 @@ def index_analysis(
             ftext = ftext + " " + " ".join((c["title"] or "") for c in cards if c["title"])
         for c in cards:
             cid = c["card_id"]
+            # P1-3 / G12：mechanism_desc 非语言中立的卡片**不建块**。判断放在这里
+            # （索引层唯一写入口）而不是放在各调用方——reindex 与回填走的是同一个
+            # index_analysis，闸门写在调用方就等于没有闸门。
+            if _is_pending(c["quality_json"]):
+                n_pending += 1
+                continue
             rows.append({
                 "chunk_id": chunk_id_for("card", cid),
                 "kind": "card",
@@ -249,7 +269,10 @@ def index_analysis(
     drop_chunks_by_ref(conn, "feature", ref_ids)
     drop_chunks_by_ref(conn, "report_section", [analysis_id])
     written = put_chunks(conn, embedder, rows)
-    return {"features": len(feats), "cards": n_cards, "sections": n_sections, "chunks": written}
+    # cards 是「本次建块的卡片数」，pending 单列：被闸门挡下的不是没有卡片，
+    # 是卡片没进索引——两者混成一个数会让调用方以为卡片丢了。
+    return {"features": len(feats), "cards": n_cards, "sections": n_sections,
+            "chunks": written, "pending_cards": n_pending}
 
 
 def _split_h2(md: str) -> list[str]:

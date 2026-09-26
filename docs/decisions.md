@@ -695,6 +695,23 @@ forget_repo(repo_id, confirm: true)           # 级联删其上全部 analysis +
 
 ---
 
+#### G12 写侧补记：`pending` 排除出检索是**索引层**的责任（V5 P1-3）
+
+本条决定里的「排除出检索/聚类集」此前**只由 `import-vibecraft` 自己实现**，且实现位置错了：
+跳过判断写在回填的建块循环里，而 `reindex` 走的是 `index_analysis` 同一个函数、**没有这道判断**。
+实测复现：跑一次 `reindex`，`reindex_state='pending'` 的分析里那些中文 `mechanism_desc` 的卡片
+照样被建成块并进入 RRF 检索与聚类集——也就是说 G12 的隔离恰好在最可能被触发的那条路径上失效。
+
+**补记决定：闸门下沉到 `index_analysis`**（索引层唯一写入口，新调用方自动受约束），
+判断依据是**卡片级 `quality_json.pending`** 而非分析级 `reindex_state`（一次分析里可能
+同时有补好和没补好的卡片，分析级标量表达不了卡片级粒度）。分析级 `reindex_state` 降级为
+**库级可见信号**：`recall_stats` 单列 `counts.pending_mechanism`，让用户看得见「还有多少卡等着补英文」，
+但它不参与建块决策。
+
+**为什么这条值得单列一条补记**：`reindex` 本身就是「换嵌入模型后必做」的操作，
+也就是说**任何换模型的用户都会踩中这个 bug**。这不是边角料，是必经路径。
+
+
 ### ✔ G14. `chunks.kind` 里的 `pattern`
 
 **决定：建。每个 pattern 恰好一个 summary chunk（`kind='pattern'`，key = `pat:<pattern_key>`）；文本 = 成员卡片 `mechanism_desc` 合成；`repo_id` 允许为 NULL；重聚类时按 key 整批覆盖；融合后施加 kind 先验，pattern 的基础权重**低于**具体卡片。**

@@ -128,7 +128,8 @@ $MEMEX_HOME/                    （默认 ~/.memex）
            analyst:  自由文本（如 "claude-code/opus-4.5" / "batch/st-embed"），
                      仅用于质量归因，不参与幂等
            producer: 'agent' | 'batch'（G21），质量指标按此分组统计
-           reindex_state: 'indexed' | 'pending'（G12：mechanism_desc 非语言中立者排除出检索）
+           reindex_state: 'indexed' | 'pending'（G12：mechanism_desc 非语言中立者排除出检索；
+                      库级可见信号，真正的判断在卡片级 quality_json.pending，见 §2.8 P1-3）
 
 ③ 知识单元（功能 → 卡片 → 证据）
   features(feature_id PK, analysis_id FK, slug, title, summary, position)
@@ -401,6 +402,37 @@ VibeCraft 的库格式已实地核对（读其 `backend/internal/store/` 与 `se
 **索引层覆盖范围**：`reindex` 清空三张派生表后按 `analyses.status` 逐条重建，故筛选里同时保留 `committed` 与 `ready`（后者是历史遗留，老库里可能还有），否则回填索引会被物理删除且永不重建。
 
 **回填自带索引**：`import-vibecraft` 在写完块之后**同一次调用里就地建索引**（`index_analysis` + `set_chunk_repo`），返回体报 `indexed_analyses`。原因：回填内容里机制描述非英文的卡片会落成 `reindex_state='pending'` 且**不建块**（见下文 reindex_state 约定），把建索引外包给用户手动 `reindex` 等于把可见性交给对方；索引是派生层，建失败只记 warning 不影响回填本体，用户仍可用 `reindex` 补建。
+
+### P1-3 补记：`pending` 必须由索引层**自己**把住（V5）
+
+G12 写的是「机制描述非语言中立的卡片**入库但 `reindex_state='pending'`，并排除出检索/聚类集**」。
+此前只有 `import-vibecraft` 在自己循环里跳过了 pending 卡片（`vibecraft.py:1079` 的 `if not m["pending"]`），
+**索引层本身没有这道闸**。而 `reindex` 走的是 `index_analysis` 同一函数——于是跑一次 `reindex`，
+pending 卡片的中文 `mechanism_desc` 就被建成块、进入三通道 RRF 检索与 `patterns/cluster.py` 的聚类集，
+G12 承诺的隔离在**最可能被触发的那条路径上**失效（实测复现：reindex 后该卡块数 0 -> 1）。
+
+**决定：闸门放进 `index_analysis`（唯一写索引的地方），不放调用方。** 理由与 `reindex` 的守卫同源——
+「谁都能绕过调用方检查」等于没检查。判断依据是**卡片自己的 `quality_json.pending`**，
+不是分析级 `reindex_state`：一次分析里可能同时有「已补英文描述」与「仍缺英文描述」的卡片，
+分析级一个标量表达不了卡片级粒度；而 `index_analysis` 本来就逐卡遍历，判断顺手。
+分析级 `reindex_state='pending'` 保留为**库级可见信号**（`recall_stats` 单列 `pending_mechanism`），
+不参与建块决策。
+
+**为什么不能靠「中文描述照样建块，只是效果差一点」**：跨语言召回是第二支柱，
+中文 `mechanism_desc` 建出来的向量在**中英混合语料**里会把「同机制但描述语言不同」的卡片拉近，
+同时把纯英文的跨语言匹配挤掉——丢的正是这个项目唯一的存在理由。宁可少召回，不可假装跨语言。
+
+**闸门位置的三选一与取舍**：
+
+| 位置 | 结论 |
+|---|---|
+| 调用方各判各的（现状） | ✗ `reindex` 绕过去了，且将来每个新调用方都要重犯 |
+| `index_analysis` 逐卡判断 | ✔ **采用**——唯一写索引处，新调用方自动受约束 |
+| `search` / `cluster` 查询时过滤 | ✗ 治标：块、向量、FTS 行仍在，召回统计与聚类输入仍被污染 |
+
+**派生层残留的代价要诚实**：块不建，但**卡片本身仍在 `cards` 表里、仍可经 `get_card` 读到**。
+这是有意的——`get_card` 是查「这个仓当初分析出了什么」的路径，不是检索路径。
+因此 `search` 侧**无需**再加 pending 过滤（没有块可命中），`cluster` 侧也不用（没有向量可用）。
 
 **代价要诚实**：两处落差决定了「相当一部分旧卡片回填不过」，所以 `--dry-run` 必做、
 `evidence_hit_rate` 必报——**能救几张是几张**，不追求全量。

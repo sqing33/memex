@@ -1030,7 +1030,8 @@ stdio 本地形态下调用它也允许（返回本地文件 `file://` 路径或
         "features": { "type": "integer" },
         "cards":    { "type": "integer" },
         "patterns": { "type": "integer" },
-        "chunks":   { "type": "integer" }
+        "chunks":   { "type": "integer" },
+        "pending_mechanism": { "type": "integer" }
       }
     },
     "quality": {

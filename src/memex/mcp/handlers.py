@@ -1138,6 +1138,7 @@ def _t13_recall_stats(rt: Runtime, args: dict[str, Any]) -> dict[str, Any]:
         "cards": st.get("cards", 0),
         "patterns": st.get("patterns", 0),
         "chunks": st.get("chunks", 0),
+        "pending_mechanism": st.get("pending_mechanism", 0),
     }
     payload: dict[str, Any] = {
         "ok": True,

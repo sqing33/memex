@@ -358,6 +358,12 @@ def stats(conn: sqlite3.Connection) -> dict[str, Any]:
         "patterns": count("SELECT COUNT(*) FROM patterns"),
         "chunks": count("SELECT COUNT(*) FROM chunks"),
         "sessions": count("SELECT COUNT(*) FROM sessions"),
+        # P1-3 / G12：还等着 agent 补英文 mechanism_desc 的卡片数。这些卡在 cards 表里
+        # 但**不建块**，所以既不进检索也不进聚类；G12 明确要求单列这个计数。
+        "pending_mechanism": count(
+            "SELECT COUNT(*) FROM cards "
+            "WHERE json_extract(quality_json, '$.pending') = 1"
+        ),
         "schema_version": schema_version(conn),
         "embedder": _meta_get(conn, "embedder"),
     }
