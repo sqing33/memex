@@ -655,14 +655,18 @@ chunk_id/kind/ref_id/card_id/text/repo_id/language/heading），检索侧也没�
   一律留 NULL 而不是补一个默认值——「把『不知道』写成『agent』」是假信号。
 - `pattern` 块的 producer 由成员**投票**决定：取成员卡 producer 的多数值；
   平票或成员全为 NULL 时留 NULL（pattern 本来就跨仓跨 producer，单值是简写不是事实）。
-- 检索结果 `results[].producer` **可能为 null**（历史块 / 跨 producer 的 pattern），
-  契约里就是 `["string","null"]`，**不给默认值**。
+- 检索结果 `results[].producer` 的取值**只有 `agent` | `batch` 两种**——库里就这两条生产路径，
+  自造第三种（例如把 VibeCraft 回填叫 `import`）只会让调用方去猜。
+  **没有这个键就是来源不明**（历史块 / 拿不到多数的 pattern 块），不给 null：
+  恒为 null 的键是噪音，而且会被下游当成了「确实是 agent」。
+  为什么不是 `["string","null"]`：schema 声明了 null，调用方就得写一份 null 判断分支，
+  而「键不存在」在 JSON 语义上本来就是「这个属性没有值」，判一次即可。
 
 **`analyze_repo` 在 V5 的形态**：batch 直跑要自带一次 LLM 调用，server 端没有配置
 LLM 凭据、没有提示词版本管理、没有成本上限。按 AGENTS.md 第一原则
 「机械活留在 server，判断力交给 agent」，服务端 LLM 批量分析**正是把判断力搬回 server**——
 所以本轮决定**不实现** `analyze_repo`：现有的 `raise MemexError("unsupported")` 是**正确的**，
-它让能力探测（`details.planned="V5"`）如实告诉调用方这条路没有，而不是给一个跑不通的半成品。
+它让能力探测（`details.decided="not_implemented"`）如实告诉调用方这条路没有，而不是给一个跑不通的半成品。
 真要做，正确的形态是 `MEMEX_BATCH_LLM` 显式配置 + 每次调用记 `analyst=batch/<模型名>` +
 独立成本上限开关，且默认**关**。
 

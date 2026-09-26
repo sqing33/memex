@@ -152,10 +152,12 @@ $MEMEX_HOME/                    （默认 ~/.memex）
   chunks(chunk_id PK, kind, ref_id, card_id, text, repo_id, language, heading, producer)
         kind ∈ feature | card | pattern | report_section
         ref_id: pattern chunk 存 pattern_key（'pat:<key>'）；repo_id 对 pattern 允许 NULL（★ G14）
-        producer: 这条块的生产者（agent | batch | import），**建块那一刻就定死**。★ G21 补记：
+        producer: 这条块的产生者，取值只有 `agent` | `batch`（G21 补记：
+                  库里的生产路径就这两条，自造第三种取值只会让调用方猜）。
                   历史块与无法判定来源的块为 NULL —— 「把『不知道』写成『agent』」是假信号；
                   pattern 块的 producer 由成员卡的 producer 多数投票得出（平票/全 NULL 留 NULL），
                   因此 pattern 的 producer 是简写而不是事实（它天然跨仓跨 producer）。
+                  检索结果里**没有这个键**就是来源不明，不给 null 让人猜（★ 契约如此，JSON 才有此键）。
   chunk_vectors(chunk_id PK, embedder, dim, vec BLOB)   ← ★ G11：每行记自己的编码模型
                                                         vec = float32 小端打包
   chunk_fts                                        ← FTS5，tokenize='trigram'

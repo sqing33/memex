@@ -40,7 +40,7 @@
 
 | 工具 | 归属 | 为什么不在 V1 |
 |---|---|---|
-| `analyze_repo`（服务端 `batch` 直跑） | `gaps.md` G21 | 与 agent 驱动共用同一套校验，排在 V5 |
+| `analyze_repo`（服务端 `batch` 直跑） | `gaps.md` G21 | **已定案不实现**（`decisions.md` G21 写侧补记）：服务端 LLM 批量分析正是把判断力搬回 server，违反 AGENTS.md 第一原则；调用它只会拿到 `unsupported` |
 | `export_site` | — | 是 CLI 子命令（`memex export-site`），不是 MCP 工具 |
 
 ---
@@ -1330,7 +1330,7 @@ server 登记，**server 因此不必出网、也不必持私有仓凭据**（G2
 
 ## 6. 后续（不阻塞 V1）
 
-- `analyze_repo`（服务端 batch 直跑）→ `decisions.md` G21（排 V5）。
+- `analyze_repo`（服务端 batch 直跑）→ `decisions.md` G21 写侧补记：**已决定不实现**，现有 `unsupported` 拒绝是正确行为（能力探测据此如实告知这条路没有）。
 - `outputSchema` 是否被目标客户端强制校验 → 需实测（`gaps.md` G2 的实测项）。
 
 **已定案、不再空缺**：`forget_analysis` / `forget_repo` 签名（本文 T15/T16，G8）；
