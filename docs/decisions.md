@@ -489,6 +489,36 @@ forget_repo(repo_id, confirm: true)           # 级联删其上全部 analysis +
 - **索引层** 不迁移，直接 `reindex`。
 - `cli` 加 `memex migrate [--to X] [--dry-run]`；`--dry-run` 打印将执行的动作。
 
+#### 产物文件名必须自守（V5 P3 实测撞出来）
+
+`export_site` 把库里的 `repo_id` 直接拼成 `out/<repo_id>.html` 的文件名，
+而 `repos.repo_id` 是 `TEXT PRIMARY KEY`——**DDL 上没有任何 CHECK 约束**。
+实测种一行 `repo_id = 'evil/../../x'` 进去，
+导出时抛 `FileNotFoundError: .../site/evil/../../x.html`：
+不是静默写到 `out` 外面，而是**整个导出直接崩掉**。
+
+当前**经由正常入口还造不出这种脏值**：
+`parse_repo_url` 与 `vibecraft__ + slugify(...)` 兜底都会去掉路径分隔符
+（slugify 吃掉 `/` 与 `..`，实测 `../../etc/passwd` → `etc-passwd`）。
+但那是**调用方的卫生，不是被调用方的护栏**——
+以后多任何一个写 `repos` 的路径（手工 SQL、新的导入格式、迁移脚本），
+就会让整个站点导出崩掉，而且崩法很难一眼看懂。
+
+**决定**：`export_site` 自己按文件名重写 `repo_id`，不信任库里的原值。
+规则：**重写后与原值不一致的行一律跳过**（并计数进返回值），
+而不是就地改库或写出一个可疑文件——脏数据要显式暴露，不能被悄悄修掉。
+正常仓（`host__owner__name`）经同一套重写后与原值相同，行为不变。
+顺带把超长名（> 255 字节）一并挡掉，那本来就会抛 OSError。
+
+**实现时又撞出两件事，一并记在这里：**
+
+1. **防碰撞靠的不是「把非法字符换成 `_`」，而是跳过规则本身。** 重写函数会把 `a/b` 和 `a_b`
+   都压成 `a_b`——换成 `_` 并没有解决唯一性（丢掉字符只会更糟）。真正的保障是：
+   需要改写的 id 全部被跳过，于是**真正被写盘的那批 id 上重写是恒等映射**。
+   写成「换成 `_` 就不会碰撞」是自我欺骗，测试当场就打脸。
+2. **`repos` 计数必须扣掉被跳过的行。** 原来直接用 `len(repo_rows)`，
+   于是首页写「2 个仓库」却只列了 1 个——脏数据没消失，只是从崩变成了数不对。
+
 #### G9 补记：版本号靠人维护，列是代码事实（V5 实测撞出来的）
 
 **起因**：为 G21 跑真库 `reindex` 时崩在 `sqlite3.OperationalError: table chunks has no column named producer`。

@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import html
+import re
 import sqlite3
 from pathlib import Path
 from string import Template
@@ -174,10 +175,10 @@ def _counts_brief(a: sqlite3.Row | None) -> str:
     return "功能 " + _dash(c.get("features")) + " · 卡片 " + _dash(c.get("cards")) + " · 证据 " + _dash(c.get("evidence"))
 
 
-def _render_index_row(r: sqlite3.Row, a: sqlite3.Row | None) -> str:
+def _render_index_row(r: sqlite3.Row, a: sqlite3.Row | None, fname: str) -> str:
     desc = _e(r["description"]) if r["description"] else '<span class="muted">' + _DASH + "</span>"
     return _INDEX_ROW.substitute(
-        href=_e(str(r["repo_id"]) + ".html"),
+        href=_e(fname + ".html"),
         full_name=_e(r["full_name"]),
         description=desc,
         language=_dash(r["language"]),
@@ -226,11 +227,42 @@ def _render_repo_page(r: sqlite3.Row, analyses: list[sqlite3.Row]) -> str:
     )
 
 
+def _page_filename(repo_id: str) -> str | None:
+    """把 repo_id 重写成一个安全的产物文件名。
+
+    库里的 repo_id 没有 DDL 约束（TEXT PRIMARY KEY），本函数是最后一道护栏：
+    返回 None 表示这个 repo_id 写不进文件名（调用方应跳过并计数），
+    返回的字符串保证不含路径分隔符、不是 . / ..、且不超过 255 字节。
+
+    正常仓的 repo_id 是 host__owner__name，原样返回，行为不变。
+    """
+    name = repo_id
+    if not name or name in ('.', '..'):
+        return None
+    # 只保留文件名里合法的字符；其余换成下划线而不是丢掉（丢掉会把 a/b 与
+    # a_b 都压成 ab）。真正的防碰撞在调用方：改写结果与原值不一致的一律跳过，
+    # 因此真正被写盘的 id 集合上这个映射是恒等映射，天然不碰撞。
+    cleaned = re.sub(r'[^A-Za-z0-9._-]', '_', name)
+    if cleaned in ('', '.', '..'):
+        return None
+    # 截断按 UTF-8 字节算（文件系统上限是 255 字节，不是 255 个字符），
+    # 且回退到字符边界，别把多字节字符切成乱码。
+    if len(cleaned.encode('utf-8')) <= 255:
+        return cleaned
+    cut = cleaned.encode('utf-8')[:255]
+    while cut:
+        try:
+            return cut.decode('utf-8')
+        except UnicodeDecodeError:
+            cut = cut[:-1]
+    return None
+
+
 def export_site(paths: Paths | None = None, cfg: Config | None = None, *, out: str | None = None) -> dict[str, Any]:
     """导出静态「仓库目录页」（C11）。
 
     生成 `out/index.html` 与 `out/<repo_id>.html`，纯静态、内联 CSS、
-    无外链资源、无 JS 依赖。返回 {out_dir, repos, files}。
+    无外链资源、无 JS 依赖。返回 {out_dir, repos, files, skipped_repo_ids}；repos 是真正导出的仓数，脏 repo_id 计入 skipped_repo_ids 而不计入 repos。
 
     `out` 缺省为 `$MEMEX_HOME/site/`（Paths.site）。
     `paths` / `cfg` 可省略（CLI 只传 out 时自动取默认环境配置）。
@@ -278,22 +310,28 @@ def export_site(paths: Paths | None = None, cfg: Config | None = None, *, out: s
 
     files: list[str] = []
     rows_html: list[str] = []
+    skipped: list[str] = []
     for r in repo_rows:
         rid = str(r["repo_id"])
+        fname = _page_filename(rid)
+        if fname is None or fname != rid:
+            # 脏 repo_id：显式跳过并记账，绝不静默写出一个可疑文件。
+            skipped.append(rid)
+            continue
         latest = by_repo[rid][0] if rid in by_repo else None
-        rows_html.append(_render_index_row(r, latest))
+        rows_html.append(_render_index_row(r, latest, fname))
         body = _render_repo_page(r, by_repo.get(rid, []))
         page = _PAGE.substitute(
             title=_e(str(r["full_name"]) + " · memex"),
             body=body,
             generated=generated,
         )
-        p = out_dir / (rid + ".html")
+        p = out_dir / (fname + ".html")
         p.write_text(page, encoding="utf-8")
         files.append(str(p))
 
     index_body = _INDEX_BODY.substitute(
-        n_repos=len(repo_rows),
+        n_repos=len(repo_rows) - len(skipped),
         n_cards=n_cards,
         n_patterns=n_patterns,
         rows="".join(rows_html),
@@ -303,4 +341,5 @@ def export_site(paths: Paths | None = None, cfg: Config | None = None, *, out: s
     index_path.write_text(index_page, encoding="utf-8")
     files.insert(0, str(index_path))
 
-    return {"out_dir": str(out_dir), "repos": len(repo_rows), "files": files}
+    return {"out_dir": str(out_dir), "repos": len(repo_rows) - len(skipped), "files": files,
+                "skipped_repo_ids": skipped}
