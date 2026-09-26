@@ -1198,6 +1198,11 @@ server 登记，**server 因此不必出网、也不必持私有仓凭据**（G2
 - **上限** `MEMEX_MAX_BUNDLE_BYTES`（默认 512MB，`operations.md` §1.3）→ 超限 `invalid_argument`。
 - **与 T4 对偶**：T4 `request_repo_bundle` 是 server → agent（下发）；T17 是 agent → server（上传）。
 - **`sha256` 给了就不姑息**：不符 `invalid_argument` 且不留半个登记行（先校验后落库）。
+- **`repo_url` 的宿主仍受白名单约束**（G6，与 `fetch_repo` 同一条 `parse_repo_url`）：宿主不在
+  `MEMEX_GIT_HOSTS`（默认 `github.com,gitlab.com,gitee.com`）时返回 `unsupported` / 宿主不在白名单。
+  **内网 GitLab 必须先把它的宿主写进 `MEMEX_GIT_HOSTS`**，否则这条离线通道用不了——
+  「不出网」不等于「不校验身份」，`repo_url` 决定的正是 `repo_id` 与 `identity_key`，
+  放行任意宿主会让两个不同主机上的同名仓撞进同一个 `repo_id`。
 - **身份**：登记时仍走 G10 的 `identity_key` 解析；上传件若无 GitHub API 可达，
   `identity_key` 退化为 `host#owner/name` 并记 `warnings`（等价于 fetch 路径的保守分支）。
 

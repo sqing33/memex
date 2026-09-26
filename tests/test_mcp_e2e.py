@@ -252,3 +252,30 @@ def test_forget_analysis_deletes_only_its_analysis(tmp_path):
         assert rec['counts']['repos'] == 1, rec
     finally:
         srv.close()
+
+def test_uninitialised_home_reports_not_found_not_internal(tmp_path):
+    """空 MEMEX_HOME 上调任何工具都必须报 not_found + 可操作提示，不能是 internal。
+
+    store.connect 会为缺失的 db 路径建出一个空库文件（只 mkdir + connect，不建表），
+    于是后续 SQL 抛 "no such table: repos"，被 dispatch 兜成 internal / 服务端异常。
+    agent 看到这条只会重试；真正要说的是「先跑 memex init」。
+    """
+    os.environ["MEMEX_HOME"] = str(tmp_path / "empty-home")
+    os.environ["MEMEX_EMBEDDER"] = "hash:64"
+    cfg = Config.from_env()
+    assert not cfg.paths.db.exists()
+    srv = Server(cfg)
+    try:
+        for name, args in [
+            ("search_implementations", {"query": "x"}),
+            ("list_repos", {}),
+            ("list_patterns", {}),
+            ("recall_stats", {}),
+            ("get_evidence_pack", {"repo_id": "github.com__a__b"}),
+        ]:
+            res = _call(srv, name, args, 400)
+            assert res["ok"] is False, (name, res)
+            assert res["error"]["code"] == "not_found", (name, res["error"])
+            assert "memex init" in res["error"]["message"], (name, res["error"])
+    finally:
+        srv.close()

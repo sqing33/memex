@@ -77,7 +77,20 @@ class Runtime:
 
     @property
     def conn(self) -> sqlite3.Connection:
+        """懒开库连接。库不存在时显式报错，绝不让 connect() 建出空壳库。
+
+        store.connect 会 mkdir 并 connect，于是缺失的 db 路径会变成一个 0 字节的
+        空文件：随后的 SQL 抛 "no such table: xxx"，被 dispatch 兜成 internal /
+        服务端异常，agent 只会重试。启动检查（startup.py）本来就会拒启，但懒连接
+        这条路径绕过了它——所以这里必须自己把关。
+        """
         if self._conn is None:
+            if not self.cfg.paths.db.exists():
+                raise MemexError(
+                    "not_found",
+                    "知识库不存在，请先运行 memex init",
+                    {"db": str(self.cfg.paths.db)},
+                )
             self._conn = store.connect(self.cfg.paths.db)
         return self._conn
 
