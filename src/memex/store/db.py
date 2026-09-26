@@ -25,6 +25,11 @@ from ..core import Config, MemexError, Paths
 # 低于 3 说明只能跨线程、不能共用同一个连接，远程形态就会随机崩 —— 故在 connect() 里显式拒绝。
 _MIN_THREADSAFETY = 3
 
+# reindex 要重建索引的 analyses.status 取值（见 reindex docstring）。
+# 两条落库路径写的值不同：agent 走 commit_report 写 committed，VibeCraft 回填写 ready。
+# 派生表清空后若漏筛某条，它的索引就再也回不来——所以这里是全集，且有守卫函数兜底。
+_REINDEXABLE_STATUSES: tuple[str, ...] = ("committed", "ready")
+
 # ———————————————————————————————— JSON 边界 ————————————————————————————————
 
 def json_dumps(obj: Any) -> str:
@@ -398,18 +403,51 @@ def forget_repo(conn: sqlite3.Connection, repo_id: str, *, confirm: bool) -> dic
     return {"repo_id": repo_id, "deleted": True, "analyses_deleted": len(a_rows)}
 
 
+def _assert_reindex_covers_all(conn: sqlite3.Connection) -> None:
+    """守卫：库里有本常量没覆盖的 status 值时**显式报错**，而不是照常清空派生表。
+
+    没有这层守卫的话，将来再加一条落库路径写了新 status，reindex 仍会
+    静默把它的索引删光且永不重建（这正是 BUG-1 的形状）。
+    """
+    seen = {r["status"] for r in conn.execute("SELECT DISTINCT status FROM analyses").fetchall()}
+    missing = sorted(seen - set(_REINDEXABLE_STATUSES))
+    if missing:
+        raise MemexError(
+            "internal",
+            "analyses.status 出现了 reindex 不会重建的取值 "
+            + str(missing)
+            + "；直接清空派生表会让这些分析的索引永久丢失。"
+            "请把它们加入 _REINDEXABLE_STATUSES 或改用既有取值。",
+            {"unknown_statuses": missing, "reindexable": list(_REINDEXABLE_STATUSES)},
+        )
+
+
 def reindex(paths: Paths, *, embedder_spec: str | None = None) -> dict[str, Any]:
-    """整层重建索引：清空 chunks/vectors/fts，再按 analyses 逐条重算（R层）。"""
+    """整层重建索引：清空 chunks/vectors/fts，再按 analyses 逐条重算（R层）。
+
+    覆盖范围是 `_REINDEXABLE_STATUSES` 的全集：agent 提交写 `committed`、
+    VibeCraft 回填写 `ready`，两条落库路径一视同仁。派生表被清空后若漏筛某条，
+    它的索引就再也回不来（V5 审计 BUG-1），故选不中任何已落库分析时显式报错，
+    不静默产出空索引。
+    """
     from ..embeddings import get_embedder
     from .index import index_analysis
 
     conn = connect(paths.db)
     try:
+        # 守卫必须**先于**清空：连接是 autocommit（isolation_level=None），
+        # DELETE 落盘后即使后面 raise，派生表也已经空了。放错顺序等于
+        # 「报了错但索引已经没了」——正是零假成功要避免的形状。
+        _assert_reindex_covers_all(conn)
         emb = get_embedder(embedder_spec or _meta_get(conn, "embedder"))
         for t in ("chunk_vectors", "chunk_fts", "chunks"):
             conn.execute(f"DELETE FROM {t}")
         n_chunks = 0
-        rows = conn.execute("SELECT analysis_id, report_md FROM analyses WHERE status = 'committed'").fetchall()
+        placeholders = ",".join("?" * len(_REINDEXABLE_STATUSES))
+        rows = conn.execute(
+            "SELECT analysis_id, report_md FROM analyses WHERE status IN (" + placeholders + ")",
+            _REINDEXABLE_STATUSES,
+        ).fetchall()
         for r in rows:
             res = index_analysis(conn, emb, r["analysis_id"], report_md=r["report_md"])
             set_repo = conn.execute(

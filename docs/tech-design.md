@@ -394,6 +394,8 @@ VibeCraft 的库格式已实地核对（读其 `backend/internal/store/` 与 `se
 **硬约束**：回填同样要过 `validate_report`（否则等于绕过证据链门禁）；`mechanism_desc` 必须
 **语言中立**（G13/D1），VibeCraft 的中文 `mechanism` 需 agent 补写英文描述前先标
 `reindex_state='pending'` 排除出检索；产物标 `producer=batch` / `analyst=vibecraft-import`。
+**索引层覆盖范围**：`reindex` 清空三张派生表后按 `analyses.status` 逐条重建，而回填写 `ready`、agent 提交写 `committed`——**两个值都要进筛选**，否则回填索引会被物理删除且永不重建（派生表可重建，但重建不出来）。
+
 **代价要诚实**：两处落差决定了「相当一部分旧卡片回填不过」，所以 `--dry-run` 必做、
 `evidence_hit_rate` 必报——**能救几张是几张**，不追求全量。
 

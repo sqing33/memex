@@ -176,6 +176,18 @@ git clone https://$TOKEN@github.com/me/private.git
 
 ---
 
+### 5.1 reindex 的覆盖范围（别只盯 committed）
+
+`reindex` 会先清空 `chunks` / `chunk_vectors` / `chunk_fts` 三张派生表，再逐条重建——所以它的筛选条件就是**真源层会不会被抹掉**的分界线。
+
+两条落库路径写的 `analyses.status` 不同：agent 走 `commit_report` 写 `committed`，VibeCraft 回填写 `ready`。**只筛 `committed` 会把回填进来的索引删掉且永不重建**，而 `import-vibecraft` 的 `next_step` 恰恰让用户去跑 reindex——闭环断裂。两个值都必须进筛选。
+
+| 现象 | 根因 | 处置 |
+|---|---|---|
+| 跑完 `reindex` 后回填仓检索不到任何东西，且 `memex stats` 的 `chunks` 归零 | 筛选漏了 `ready` | 修好筛选后重跑；真源层（`analyses/features/cards/evidence`）还在，可完整重建 |
+
+排查任何 `reindex` 后的计数异常，先查 `SELECT status, COUNT(*) FROM analyses GROUP BY status`——看它有没有覆盖你库里的全部状态值。
+
 ## 6. 常见故障与处置
 
 | 现象 | 原因 | 处置 |
