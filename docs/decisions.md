@@ -3,7 +3,7 @@
 > 记录方案里每一条「还没定下来」的选择，以及定下来的理由。
 > 状态：`✔ 已定` / `◻ 待定`。阻塞级问题答完才动代码。
 >
-> **A–E 五组共 21 条（架构与取舍）+ G 组 26 条（G1–G24 及 G27/G28/G29，分四批定案）= 已定 47 条。**
+> **A–E 五组共 21 条（架构与取舍）+ G 组 27 条（G1–G24 及 G27/G28/G29，分四批定案）= 已定 48 条。**
 > `gaps.md` 里**仅剩第 4 批 3 项**（G23 质量阈值 / G25 rerank 选型 / G26 远程会话清扫），
 > **全部需实测**——用 V1–V4 的真实数据定，现在拍必然错。G24 聚类阈值、G29 检索权重已用真模型实测定值。
 
@@ -886,14 +886,55 @@ top-1 9/15、top-10 14/15、MRR 0.722 变为 **10/15、15/15、0.776**。
 
 ---
 
-## 待议：G 组（第 4 批，余 3 项）
+### G23. 质量项定成硬门禁，不定成阈值
+
+**结论**：`code_mismatch == 0` 保持硬门禁（已是 B9）；
+**其余质量项定成「校验器规则门禁」，不定分数阈值。**
+五轴雷同新增 `axis_reuse` 问题码；`axis_completeness` / `evidence_coverage`
+在提交路径上**恒为 1.0**，没有可用的分布，定阈值只会造出永远通过的空门禁。
+
+**为什么不是阈值**。V2 五仓实测（`quality_json` 全字段）里，
+三项质量指标零区分度：`axis_completeness=1.0`、`evidence_coverage=1.0`、
+`code_mismatch=0`，五个仓一模一样。规模类（features 3–5 / cards 11–22）
+与仓库体量强相关，不是质量。
+更深一层：`commit` 只在 `is_valid=True` 时执行，校验器已拦住空轴、占位符、
+缺证据，所以「非空轴占比」「有证据卡占比」**结构上不可能不是 1**——
+它们不是「分布好」，是**没有分辨力**。
+（顺带修掉写死这两个值的 bug：`commit.py` 曾把两个 1.0 硬编码进
+`quality_json`，从不读校验器。现在改为真算，并新增两个真有区分度的
+`axis_diversity` / `reusable_rate`。PTNexus 实测 `reusable_rate=0.889`
+是五仓唯一有变化的真质量项。）
+
+**能拒的是规则，不是分数**。九类坏样本实测（`reports/g23_gates.py`）：
+八类当场被拦，唯一漏网的「五轴正文一字不差」已补 `axis_reuse` 门禁。
+现在九类全部拦住，基准（未经改动的 axum 报告）仍放行：
+
+| 坏样本 | problem code |
+|---|---|
+| 占位符 TBD / 无 | `blank_principle` |
+| 五轴正文完全相同 | `axis_reuse` |
+| snippet 缺 code | `code_required` |
+| mechanism 带 code_spans | `code_forbidden` |
+| code 与仓库不符 | `code_span_mismatch` |
+| 行号越界 | `line_out_of_range` |
+| mechanism_desc 写成中文 | `principle_too_short` + `unicode_language_mismatch` |
+| 所有卡 reusable=0 | `bad_enum` |
+
+所以「质量阈值」这个空缺的正确答案是：**质量由结构化规则保证，不由分数保证**。
+若将来某指标真出现分布跨度，再单独定阈——那时才是有数据支撑的。
+
+实现见 `src/memex/contract/validator.py`（`_axis_signature` / `_counts`）
+与 `src/memex/analyze/commit.py`；测试 `tests/test_validator_axes.py`、
+`tests/test_quality_metrics.py`。
+
+---
+
+## 待议：G 组（第 4 批，余 2 项）
 
 第 1–3 批（G1–G3、G4–G9、G10–G22、G27、G28）与第 4 批的 G24 / G29 **已定**（见上）。
-仅剩第 4 批 3 项，**必须先用真实数据实测才能定**（现在拍必然错）：
+仅剩第 4 批 2 项，**必须先用真实数据实测才能定**（现在拍必然错）：
 
-- **G23 质量阈值** —— `code_mismatch` 硬 0 已定；其余指标（功能数、轴完整度、证据覆盖率、
-  会话 turn/token 上限）**V2 末用真实分布定阈**（V1 两次提交已产出 `quality_json` 实测值：
-  `axis_completeness=1`、`evidence_coverage=1`、`code_mismatch=0`，但样本量 2 不足以定阈）。
+- ~~**G23 质量阈值**~~ —— **已定**：质量定成硬门禁不定阈值，详见上方 G23 条目。
 - **G25 rerank 选型** —— D2 已定「质量必需」；**V4 选具体 cross-encoder 并测 Top-3 提升，
   若无提升如实记录**。
 - **G26 远程会话清扫** —— 是否加后台线程由 G18 的 TTL 实测决定；一并测 `ThreadingHTTPServer`

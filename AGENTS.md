@@ -33,8 +33,10 @@
 - 代码走「**完整契约 + 垂直切片**」：设计保持完整形态，先实现 V1 —— 一条端到端闭环
   （`fetch → evidence → begin → validate → commit → search`），17 个 MCP 工具全部可用，
   用一个真实仓库 + 真实 agent 验证「agent 驱动到底可不可行」。`src/` 见 [`src/README.md`](src/README.md)。
-- 28 项空缺已定 25 项：**G24 聚类阈值已定案**（0.60 + complete-linkage，见 `decisions.md` G24）；
-  只剩 **G23 质量阈值 / G25 rerank 选型 / G26 远程会话清扫** 三项待实测——
+- 29 项空缺已定 27 项：**G23 质量项定成硬门禁**（五轴雷同新增 `axis_reuse`
+  问题码，不定分数阈值，见 `decisions.md` G23）、**G24 聚类阈值 0.60 + complete-linkage**、
+  **G29 检索权重**（vector = keyword，substr 只兜底）。
+  只剩 **G25 rerank 选型 / G26 远程会话清扫** 两项待实测——
   **现在拍数字必然是错的**，必须等真实分布与真模型。
 - 因此：**改动契约前先改文档**。`docs/` 与代码不一致时，以 docs 为准并修代码。
 - 校验顺序 V1–V5 是**验证切片**（不是降级阶梯）：V1 单仓闭环 → V2 3–5 跨语言仓库 →
@@ -52,8 +54,8 @@
 | `docs/report-contract.md` | 报告契约散文版：4 个固定 H2、五原理轴、五类卡片定义 + 正/反例 |
 | `docs/mcp-tools.md` | **17 个 MCP 工具**的入参/出参、全局约定、错误模型、注解表 |
 | `docs/operations.md` | 运维：环境变量、忽略规则、子命令、启动检查、故障处置 |
-| `docs/decisions.md` | 已定项 + 理由（A–E 五组 21 条 + G 组已定 25 条） |
-| `docs/gaps.md` | 空缺清单（仅剩 G23 / G25 / G26 三项待实测） |
+| `docs/decisions.md` | 已定项 + 理由（A–E 五组 21 条 + G 组已定 27 条） |
+| `docs/gaps.md` | 空缺清单（仅剩 G25 / G26 两项待实测） |
 
 **原则：`decisions.md` 记「已定 + 理由」，`gaps.md` 记「未定 + 建议」——两份互补。**
 
