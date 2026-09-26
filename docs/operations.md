@@ -200,12 +200,35 @@ git clone https://$TOKEN@github.com/me/private.git
 
 ### 5.2 站点 / list_repos 上语言是空的
 
-`repos.language` 由**克隆目录的文件后缀统计**得出（见 tech-design §4.6.1），所以它不会为空，除非那个仓库确实没有可识别的源文件（空仓、纯文档仓、深度跳过 vendored 目录）。
+`repos.language` 由**克隆目录的文件后缀统计**得出（见 tech-design §4.6.1），不是联网查的。所以它为 `NULL` 只有两种可能：这个仓确实没有可识别的源文件，**或者这一行是写侧落地之前入库的**——后者更常见，别一上来就怀疑前者。
 
 | 现象 | 排查 |
 |---|---|
-| `list_repos` 的 `language` 是 `NULL` | 该仓源文件全部落在跳过目录里，或仓库是空仓 |
-| `stars` / `license` / `description` 是 `NULL` | **不是 bug**：V1 不打元数据 API，这三项一律如实留空 |
+| `list_repos` 的 `language` 是 `NULL` | 见下方三个成因——**先按成因 1 查，别一上来就怀疑源文件缺失** |
+| `stars` / `license` / `description` 是 `NULL` | 同上，多半是**这行早于元数据写侧落地入库**；只有 `github.com` 会被填（`hostmeta.SUPPORTED_META_HOSTS`），其他宿主一律留空 |
+
+**三个成因（按现实发生频率排序）**：
+
+1. **该仓是 P2-1 写侧落地之前入库的**（最常见）。`repos.language` 的写侧是后补的，
+   在那之前 fetch 进来的行这一列天然是 `NULL`，跟仓库内容毫无关系。
+   判据：`git log -1 --format=%ad --date=short -- src/memex/fetch/detect.py` 看写侧落地日期，
+   早于该仓 `analyses.created_at` 的就中招。
+   **修法：对同一个仓 `fetch_repo(refresh=true)` 一次**——注意**必须带 `refresh`**，见下面那条坑。
+   （只补列、不动分析：`_upsert_repo` 带 `language` 重跑一次即可，
+   实测只有 `language` 与 `cloned_at` 两列变化，`analyses` / `cards` 计数不动。）
+2. 该仓源文件全部落在跳过目录（`vendor` / `node_modules` / `target` …）里，或仓库是空仓 / 纯文档仓。
+3. （罕见）仓库改名或转移后 `repo_id` 变了，新行还没 fetch 过。
+
+**成因 1 与 2 的症状完全一样**（都是 `NULL`），光看库是分不出来的，
+只能直接跑一次 `detect_language` 看它认不认得出来：认得出来就说明是成因 1。
+
+> **坑（实测踩过）**：不带 `refresh` 重新 `fetch_repo` **补不上这一列**。
+> 幂等命中走的是 `fetch/repo.py` 的缓存分支——见到 `head_sha` 已存且克隆目录还在就直接 `return`，
+> **根本不进 `_upsert_repo`**，所以 upsert 里那条 `language=excluded.language` 压根没机会执行。
+> 实测：重复 `fetch_repo("https://github.com/sqing33/PTNexus")` 后该行 `language` 仍是 `NULL`，
+> 且整行**零列变化**（`analyses` / `cards` 计数也不变）。带 `refresh=true` 才会重克隆并走 upsert。
+> 这个分支本身是合理的幂等设计（不该为了补一列就去触网重克隆），
+> 但它意味着「重 fetch 就能修」这句话对老库是错的——文档不写清楚就等于骗人。
 
 手工核对某个仓的真实主语言：
 
