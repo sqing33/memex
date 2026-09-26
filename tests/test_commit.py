@@ -8,8 +8,11 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from memex.analyze import commit_report  # noqa: E402
+
+from _axes import PRIN  # noqa: E402
 from memex.core import Config  # noqa: E402
 from memex.embeddings import hash_embedder  # noqa: E402
 from memex.session import manager as sm  # noqa: E402
@@ -22,7 +25,6 @@ AX = " ".join(
     "so the reader fully understands the design choices and their practical implications for real deployments today".split()
 )
 assert len(AX.split()) >= 40, "夹具轴文本必须 >= 40 单位"
-PRIN = {k: AX for k in ["runtime_control_flow", "data_flow", "state_lifecycle", "failure_recovery", "concurrency_timing"]}
 S = "Implements a bounded retry loop with exponential backoff and jitter for all remote calls"
 
 

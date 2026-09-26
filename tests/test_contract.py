@@ -9,13 +9,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from memex.contract import validate_report  # noqa: E402
 
+from _axes import PRIN  # noqa: E402
+
 AX = " ".join(
     "This axis explains in considerable detail exactly how the component behaves across normal and "
     "abnormal situations including retries timeouts cancellation partial failures and concurrent access "
     "so the reader fully understands the design choices and their practical implications for real deployments today".split()
 )
 assert len(AX.split()) >= 40, "夹具轴文本必须 >= 40 单位"
-PRIN = {k: AX for k in ["runtime_control_flow", "data_flow", "state_lifecycle", "failure_recovery", "concurrency_timing"]}
+# 五轴必须各写各的：G23 的 axis_reuse 门禁会拒掉一字不差的五轴。
+
 S = "Implements a bounded retry loop with exponential backoff and jitter for all remote calls"
 
 

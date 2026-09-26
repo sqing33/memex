@@ -84,6 +84,16 @@ MIN_INTENT_UNITS = 5
 # —— 契约占位符（一律视为「空」，docs/report-contract.md §3）——
 BLANK_PLACEHOLDERS = ("n/a", "na", "无", "未知", "待补充", "todo", "tbd", "???")
 
+# —— 五原理轴雷同门禁（G23）——
+# 阈值取「三轴以上雷同即拒」：五轴是五个维度，三轴雷同就没有信息量了，
+# 而四轴雷同 / 五轴全同自然也落在同一条规则内。
+MAX_AXIS_REUSE = 2
+# 判定雷同前先剥掉的标点与空白（反引号用 chr 拼，避免源码里出现裸反引号）。
+AXIS_NEGLECT = (" \t\r\n"
+    ".,;:!?、，。；：！？「」『』（）"
+    "()【】[]{}<>《》…—"
+    "～~·|/" + chr(92) + chr(34) + "@#$%^&*+=_" + chr(96) + chr(39) + "rq’‘“”")
+
 # —— 召回融合（docs/tech-design.md §2.5）——
 RRF_K = 60
 KIND_PRIOR: dict[str, float] = {

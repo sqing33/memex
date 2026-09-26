@@ -76,7 +76,7 @@ _REPORT_CONTRACT = """## memex/report/1 契约速览
 
 ### 问题码（validate_report 的 problems[].code，闭集）
 unknown_field / missing_field / too_few_features / duplicate_feature_key /
-blank_principle / principle_too_short / bad_evidence_path / line_out_of_range /
+blank_principle / principle_too_short / axis_reuse / bad_evidence_path / line_out_of_range /
 code_span_mismatch / code_required / code_forbidden / bad_enum / unicode_language_mismatch
 
 每条问题都带 `where`（JSON Pointer，如 `/features/2/cards/0/code`）以便精确定位。

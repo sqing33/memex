@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from ..constants import (
+    AXIS_NEGLECT,
     BLANK_PLACEHOLDERS,
     CARD_KINDS,
     CODE_REQUIRED_KINDS,
@@ -24,6 +25,7 @@ from ..constants import (
     MIN_INTENT_UNITS,
     MIN_PRINCIPLE_UNITS,
     MIN_SUMMARY_UNITS,
+    MAX_AXIS_REUSE,
     PRINCIPLE_KEYS,
 )
 from ..core import count_units, is_blank, json_pointer_escape
@@ -264,6 +266,18 @@ def _check_feature(feat: dict[str, Any], i: int, seen_keys: set[str], ctx: _Ctx)
             elif count_units(text) < MIN_PRINCIPLE_UNITS:
                 ctx.problem("principle_too_short", _ptr("features", i, "principles", axis), "轴内容过短")
 
+        # G23：五轴雷同门禁——三轴以上正文同一句话，说明这一轴没被真正分析过。
+        sigs = [_axis_signature(_as_str(p)) for p in principles.values()
+                if isinstance(p, (str, dict))]
+        sigs = [g for g in sigs if g]
+        if sigs and len(set(sigs)) <= MAX_AXIS_REUSE:
+            ctx.problem(
+                "axis_reuse",
+                _ptr("features", i, "principles"),
+                f"五原理轴有 {len(sigs) - len(set(sigs))} 轴正文雷同（归一化后同一文本），"
+                f"只有 {len(set(sigs))} 个不同维度",
+            )
+
     cards = feat.get("cards")
     if not isinstance(cards, list):
         ctx.problem("missing_field", _ptr("features", i, "cards"), "cards 必须是列表")
@@ -387,6 +401,15 @@ def _norm(parts: list[str]) -> str:
             if stripped:
                 out.append(stripped)
     return "\n".join(out)
+
+
+def _axis_signature(text: str) -> str:
+    """五轴雷同判定的归一化指纹：去掉标点与空白后剩下的字符。
+
+    只改标点或空格的改写不算回答了另一个维度的问题，那种改写是蒙混
+    （G23 的实测动机：urllib3 报告五轴一字不差，校验器当时不报错）。
+    """
+    return "".join(ch for ch in text if ch not in AXIS_NEGLECT).lower()
 
 
 def _check_evidence_list(evs: Any, where: str, ctx: _Ctx, *, min_items: int) -> None:

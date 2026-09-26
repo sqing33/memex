@@ -590,7 +590,8 @@ stdio 本地形态下调用它也允许（返回本地文件 `file://` 路径或
       "required": ["code", "where", "message"],
       "properties": {
         "code": { "enum": ["unknown_field", "missing_field", "too_few_features", "duplicate_feature_key",
-                           "blank_principle", "principle_too_short", "bad_evidence_path",
+                           "blank_principle", "principle_too_short", "axis_reuse",
+                           "bad_evidence_path",
                            "line_out_of_range", "code_span_mismatch", "code_required",
                            "code_forbidden", "bad_enum", "unicode_language_mismatch"] },
         "where":   { "type": "string", "description": "JSON Pointer 到出错位置" },
