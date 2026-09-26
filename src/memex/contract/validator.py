@@ -39,8 +39,9 @@ _CARD_ALLOWED = set(_CARD_REQUIRED) | {"tags", "code_spans", "code", "symbol", "
 _EVIDENCE_ALLOWED = {"path", "start_line", "end_line", "symbol", "note"}
 _CHARACTERISTIC_REQUIRED = ("title", "detail", "evidence")
 _CHARACTERISTIC_ALLOWED = set(_CHARACTERISTIC_REQUIRED)
-_ENTRY_REQUIRED = ("path", "role", "kind")
-_ENTRY_ALLOWED = set(_ENTRY_REQUIRED) | {"symbol"}
+# schema EntryPoint.required = [path, role]；kind 是可选枚举
+_ENTRY_REQUIRED = ("path", "role")
+_ENTRY_ALLOWED = set(_ENTRY_REQUIRED) | {"kind"}
 _RISK_REQUIRED = ("title", "detail", "evidence")
 _RISK_ALLOWED = set(_RISK_REQUIRED)
 _SPAN_ALLOWED = {"path", "start_line", "end_line", "symbol"}
@@ -161,7 +162,15 @@ def _result(ctx: _Ctx, report: Any) -> dict[str, Any]:
     }
 
 
-def _check_list_of_objs(report: dict[str, Any], field: str, required: tuple[str, ...], allowed: set[str], bounds: tuple[int | None, int | None], ctx: _Ctx) -> None:
+def _check_list_of_objs(
+    report: dict[str, Any],
+    field: str,
+    required: tuple[str, ...],
+    allowed: set[str],
+    bounds: tuple[int | None, int | None],
+    ctx: _Ctx,
+) -> None:
+    """校验顶层三个对象数组：数量上下界 + 逐元素形状（必填/未知字段/标题长度/证据）。"""
     val = report.get(field)
     if not isinstance(val, list):
         return
@@ -170,6 +179,45 @@ def _check_list_of_objs(report: dict[str, Any], field: str, required: tuple[str,
         ctx.problem("missing_field", _ptr(field), f"{field} 至少 {lo} 个")
     if hi is not None and len(val) > hi:
         ctx.problem("unknown_field", _ptr(field), f"{field} 至多 {hi} 个")
+    for i, item in enumerate(val):
+        base = (field, i)
+        if not isinstance(item, dict):
+            ctx.problem("missing_field", _ptr(*base), f"{field}/{i} 必须是对象")
+            continue
+        _check_unknown(item, allowed, _ptr(*base), ctx)
+        for key in required:
+            if key not in item:
+                ctx.problem("missing_field", _ptr(*base, key), f"缺少字段 {key}")
+        if field == "entry_points":
+            _check_entry_point(item, base, ctx)
+        else:
+            # characteristics / cross_feature_risks 同构：title + detail + evidence[]
+            _check_min_chars(item.get("title"), 3, (*base, "title"), ctx)
+            _check_min_chars(item.get("detail"), 15, (*base, "detail"), ctx)
+            _check_evidence_list(item.get("evidence"), _ptr(*base, "evidence"), ctx, min_items=1)
+
+
+def _check_min_chars(val: Any, minimum: int, base: tuple[Any, ...], ctx: _Ctx) -> None:
+    """按 schema 的 minLength 语义查**字符数**。
+
+    与 _check_len（信息单元）刻意不同：schema 里 characteristics.title / detail /
+    entry_points.role 写的是 minLength 字符数，用信息单元会误杀短英文标题。
+    """
+    if not isinstance(val, str) or len(val) < minimum:
+        ctx.problem("principle_too_short", _ptr(*base), f"字段过短（需 >= {minimum} 字符）")
+
+
+def _check_entry_point(item: dict[str, Any], base: tuple[Any, ...], ctx: _Ctx) -> None:
+    """EntryPoint：path 必须真实存在；role 至少 4 字符；kind 必须在封闭枚举内。"""
+    path = _as_str(item.get("path"))
+    if not path:
+        ctx.problem("missing_field", _ptr(*base, "path"), "path 不能为空")
+    elif ctx.repo_root is not None and ctx.lines(path) is None:
+        ctx.problem("bad_evidence_path", _ptr(*base, "path"), f"entry_point 指向的文件不存在：{path}")
+    _check_min_chars(item.get("role"), 4, (*base, "role"), ctx)
+    kind = item.get("kind")
+    if kind is not None and kind not in ENTRY_POINT_KINDS:
+        ctx.problem("bad_enum", _ptr(*base, "kind"), f"entry_point.kind 非法：{kind!r}")
 
 
 def _check_feature(feat: dict[str, Any], i: int, seen_keys: set[str], ctx: _Ctx) -> None:

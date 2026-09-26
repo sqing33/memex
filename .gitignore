@@ -13,3 +13,6 @@ dist/
 *.db-shm
 .memex/
 repos/
+
+# Doraemon acceptance scratch: report build chain, not a deliverable
+reports/
