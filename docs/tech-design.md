@@ -642,6 +642,37 @@ claude mcp add --transport http memex https://memex.example.com/mcp \
 不要在请求路径上下载。若服务器 CPU 弱、要更强的多语效果，就切 `MEMEX_EMBEDDER=http:<url>`
 打到一台专门的 embedding 服务（§1.4），把重活分离出去。
 
+### 4.6.1 并发形态：一个共享连接 + serialized SQLite（G26 实测）
+
+远程形态用 `ThreadingHTTPServer`：**每请求一个线程，但共用同一个进程、同一个 `Runtime`（因而共用同一个 SQLite 连接）**。
+这要求连接可跨线程使用，即 `check_same_thread=False`。
+
+**实测（G26，真 HTTP 并发打真读库工具 `list_repos`）**：
+
+| 并发客户端 | 结果 |
+|---|---|
+| 1 / 2 | 全成功 |
+| 4 / 8 / 16 | 大量 `ok:false` + `internal`，details 为 `SQLite objects created in a thread can only be used in that same thread` |
+
+根因：原 `connect()` 未设 `check_same_thread=False`（默认 True），第一个请求线程建连接后，其余线程一碰就 `ProgrammingError`。
+
+**前提校验**：放开跨线程前必须确认 `sqlite3.threadsafety >= 3`（连接可跨线程共用，即 SQLite 以 serialized 模式编译）。启动检查不满足时**显式报错并拒绝启动**——
+放开后在非 serialized 构建上会静默走向随机数据竞争，属于零假成功的反例。
+
+
+
+**accept backlog 也要放大。** `socketserver.TCPServer` 的 `request_queue_size` 默认只有 5，`ThreadingHTTPServer` 继承之，
+即 TCP accept 队列一次只排 5 个待处理连接。修复「共享连接」后单独复测发现：n=32 全通，
+n=64 起大批 `ConnectionResetError(104, 'Connection reset by peer')`（内核直接丢连接，与 SQLite 无关）。
+故在 `serve_http` 里用 `class _Server(ThreadingHTTPServer): request_queue_size = 128`。
+
+
+**修复后实测（真 HTTP，每客户端 1 次请求）**：n=8/16/32/64/128/200 全部 200/200 全通。
+两个 bug 是独立的：只修 SQLite 连接而不管 backlog，n>=64 仍会随机被重置。
+
+
+写路径的并发由 SQLite 自身保证：WAL + `busy_timeout=30000`；`isolation_level=None`（autocommit）下每条语句各自成事务，不会出现跨线程的半个事务。
+
 ### 4.7 远程带来的额外好处（顺带解决两个原方案痛点）
 
 1. **批量分析不再是大问题。** 原方案里「agent 驱动导致批量分析变苦力活」是 B2 的短板。

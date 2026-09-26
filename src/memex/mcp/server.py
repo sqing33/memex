@@ -17,7 +17,7 @@ import json
 import sys
 from typing import Any
 
-from .. import __version__
+from .. import __version__, session
 from ..core import Config
 from . import handlers
 from ..startup import run_startup_check, startup_banner
@@ -297,10 +297,34 @@ def serve_http(cfg: Config | None = None, *, host: str = "127.0.0.1", port: int 
                 return
             self._json(200, resp, extra=extra)
 
-    httpd = ThreadingHTTPServer((host, port), Handler)
+    # 后台清扫：manager.sweep 的 docstring 与 operations.md §1 都承诺过这条路径。
+    # 远程常驻时纯靠「下一次工具调用」不够——没人调用就永远不清扫，故后台线程是必需的。
+    import threading
+
+    _stop = threading.Event()
+
+    def _sweeper() -> None:
+        while not _stop.wait(60.0):
+            try:
+                session.sweep(server.rt.conn, resolved)
+            except Exception:  # noqa: BLE001 - 清扫失败不得拖垮服务进程
+                import traceback
+                traceback.print_exc()
+
+    sweeper = threading.Thread(target=_sweeper, name="memex-sweep", daemon=True)
+    sweeper.start()
+
+    # request_queue_size：socketserver.TCPServer 默认 5，即 TCP accept backlog 只有 5。
+    # 实测并发 n>=64 时大批连接被内核重置（ConnectionResetError），n=32 尚可。
+    # tech-design §4.8 的目标是「几十个并发 agent」，5 远远不够。
+    class _Server(ThreadingHTTPServer):
+        request_queue_size = 128
+
+    httpd = _Server((host, port), Handler)
     try:
         httpd.serve_forever()
     finally:
+        _stop.set()
         httpd.server_close()
         server.close()
 

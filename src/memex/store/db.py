@@ -21,6 +21,10 @@ from typing import Any
 from ..constants import SCHEMA_VERSION
 from ..core import Config, MemexError, Paths
 
+# 放开 check_same_thread=False 的前提：SQLite 必须以 serialized 模式编译（连接可跨线程共用）。
+# 低于 3 说明只能跨线程、不能共用同一个连接，远程形态就会随机崩 —— 故在 connect() 里显式拒绝。
+_MIN_THREADSAFETY = 3
+
 # ———————————————————————————————— JSON 边界 ————————————————————————————————
 
 def json_dumps(obj: Any) -> str:
@@ -41,9 +45,31 @@ def json_loads(text: Any, default: Any = None) -> Any:
 # ———————————————————————————————— 连接 ————————————————————————————————
 
 def connect(path: str | Path) -> sqlite3.Connection:
+    """开一个连接（WAL + autocommit）。
+
+    check_same_thread=False：远程形态用 ThreadingHTTPServer，**每请求一个线程**，
+    但共用同一个 Runtime（因而共用这个连接）。默认的线程亲和性检查会让第二个
+    线程一碰就 ProgrammingError（实测并发 n=4 起大量 internal，详见
+    tech-design.md §4.6.1）。放开的前提是 SQLite 以 serialized 模式编译，
+    即 sqlite3.threadsafety >= 3；不满足则**显式报错**，而不是等线上随机崩。
+    """
+    if sqlite3.threadsafety < _MIN_THREADSAFETY:
+        raise MemexError(
+            "internal",
+            "当前 Python 的 SQLite 不是 serialized 编译（threadsafety="
+            + str(sqlite3.threadsafety)
+            + " < 3），连接无法跨线程共用，远程形态会随机崩溃；"
+            "请换用 serialized 构建的 Python。",
+            {"threadsafety": sqlite3.threadsafety, "required": _MIN_THREADSAFETY},
+        )
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(p), isolation_level=None, timeout=30.0)
+    conn = sqlite3.connect(
+        str(p),
+        isolation_level=None,
+        timeout=30.0,
+        check_same_thread=False,
+    )
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA foreign_keys = ON")

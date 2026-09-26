@@ -212,6 +212,7 @@ def dispatch(rt: Runtime, name: str, args: dict[str, Any] | None) -> dict[str, A
         args = {}
     if not isinstance(args, dict):
         raise ProtocolError("arguments 必须是对象")
+    _sweep_sessions(rt)
     try:
         payload = fn(rt, args)
     except MemexError as exc:
@@ -221,6 +222,31 @@ def dispatch(rt: Runtime, name: str, args: dict[str, Any] | None) -> dict[str, A
     except Exception as exc:  # noqa: BLE001 - 兜底为 internal，绝不泄漏栈
         payload = envelope.from_exception(exc)
     return _result(payload)
+
+
+_SWEEP_LOCK = threading.Lock()
+
+
+def _sweep_sessions(rt: Runtime) -> None:
+    """顺带清扫过期会话；多线程下保证同一时刻只有一个清扫在跑。
+
+    operations.md §1 承诺「每次工具调用时顺带执行」：stdio 是单进程串行，
+    远程 serve-http 则靠这里 + 60s 后台线程双路兜底。
+
+    非阻塞：拿不到锁就直接跳过本轮（下一次调用再扫），不把清扫排成
+    工具调用的延迟。清理异常只写 stderr —— 清扫是维护性工作，失败不该
+    把用户的正常调用变成 error，但也绝不能静默无痕（零假成功）。
+    """
+    if not _SWEEP_LOCK.acquire(blocking=False):
+        return
+    try:
+        session_manager.sweep(rt.conn, rt.cfg)
+    except Exception:  # noqa: BLE001 - 清扫失败不得拖垮本次工具调用
+        import traceback
+
+        traceback.print_exc()
+    finally:
+        _SWEEP_LOCK.release()
 
 
 # --------------------------------------------------------------------------- #

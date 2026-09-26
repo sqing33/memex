@@ -83,10 +83,27 @@ git clone https://$TOKEN@github.com/me/private.git
 > **回收三步（顺序不可换）**：① 归档统计进 `session_stats`（turn / 工具调用数 / token 估算 / 耗时）
 > → ② 置 `state='abandoned'` + `abandoned_at`，**行保留** → ③ 过保留期物理删行。
 > 第 ①　步是 V1 判「agent 驱动可不可行」的唯一数据来源，**任何情况下先落统计再回收**。
-> 清扫时机：本地 stdio 由**下一次任意工具调用**顺带；`serve-http` 另加**低频后台线程（每 60s）**
+> 清扫时机：**每次工具调用时顺带执行**（本地 stdio 与远程 `serve-http` 同一口径）；
+> `serve-http` 另加**低频后台线程（每 60s）**兜底
 > （`tech-design.md` §2.6 的「若实测积压」）。
+> 远程常驻时纯靠「下一次调用」不够——没人调用就永远不清扫，
+> 故后台线程是必需的，不是可选优化。
 
 ---
+
+### 1.1 并发形态（G26 实测）
+
+`serve-http` 是每请求一线程、共用一个进程与一个 SQLite 连接。
+修复合享连接的线程亲和性 + 放大 accept backlog 后，实测 **n=200 并发客户端全通**
+（单发基线正常，n=8/16/32/64/128/200 均 200/200）。两条都是前提：
+
+1. SQLite 必须以 serialized 模式编译（`sqlite3.threadsafety >= 3`），
+否则 `connect()` 直接报错拒绝服务，不静默随机崩。
+2. `request_queue_size = 128`（默认 5 会让 n>=64 起被内核重置连接）。
+
+排障时先看 `details.reason`：出现 `SQLite objects created in a thread
+说明是连接亲和性，出现 `ConnectionResetError` 说明是 backlog 不够。
+
 
 ## 2. 忽略规则（G16）
 

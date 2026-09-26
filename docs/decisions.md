@@ -1024,7 +1024,7 @@ top-1 9/15、top-10 14/15、MRR 0.722 变为 **10/15、15/15、0.776**。
 
 ---
 
-## 待议：G 组（第 4 批，余 2 项）
+## G 组（第 4 批收尾）
 
 第 1–3 批（G1–G3、G4–G9、G10–G22、G27、G28）与第 4 批的 G24 / G29 **已定**（见上）。
 仅剩第 4 批 2 项，**必须先用真实数据实测才能定**（现在拍必然错）：
@@ -1032,7 +1032,58 @@ top-1 9/15、top-10 14/15、MRR 0.722 变为 **10/15、15/15、0.776**。
 - ~~**G23 质量阈值**~~ —— **已定**：质量定成硬门禁不定阈值，详见上方 G23 条目。
 - **G25 rerank 选型** —— D2 已定「质量必需」；**V4 选具体 cross-encoder 并测 Top-3 提升，
   若无提升如实记录**。
-- **G26 远程会话清扫** —— 是否加后台线程由 G18 的 TTL 实测决定；一并测 `ThreadingHTTPServer`
-  真实多客户端表现与 §4.8「何时才值得换 Go/Rust」。
+- ~~**G26 远程会话清扫**~~ —— **已定**：清扫挂到「每次工具调用 + 60s 后台线程」双路，并发修掉两个 bug，实测 n=200 全通。详见下方 G26 条目。
+- **G25 rerank 选型** —— 唯一待实测项。
 
 逐条列在 [`gaps.md`](gaps.md)。**第 4 批全部定案后本文件即完结。**
+
+
+### G26 远程会话清扫与并发形态（已定）
+
+**结论：清扫挂「每次工具调用 + serve-http 60s 后台线程」双路；并发上把 serve-http 修到 n=200 客户端全通；暂不换 Go/Rust。**
+
+**先说实测踩的坑——这次差点被三次「假通过」骗过去，值得记下来：**
+
+1. **只压 `tools/list` 报 8/8 全过。** `tools/list` 不碰数据库，压根走不到出问题的路径。并发压测**必须打真正读库的工具**
+（`list_repos`）。
+2. **判成功看了 `result.error` 和 `result.ok`，两个字段都不存在。**真实结构是
+   envelope（`mcp/envelope.py`）在 server 层包成 `result.structuredContent.ok`。
+   第一版据此报「成功 0/16」，第二版据此报「16/16 全过」——**两个都是错的**。
+3. **每客户端连发 3 次请求时 n>=32 冒出 `weird {}`，看起来像 SQLite 问题。**收敛成每客户端 1 次后 n=32 全通 —— 那个 `{}` 是压测客户端自身的伪影。压测工具自己也要收敛。
+
+**Bug 1：清扫是死代码。** `grep -rn 'sweep(' src/memex/` 只命中 `session/manager.py:189` 的定义本身，**零调用点**。
+而 `manager.py` 的 docstring 与 `docs/operations.md` 都承诺「每次工具调用时顺带执行」——**文档承诺了机制，代码里根本没有**。
+真实库会话全是 committed（无积压），所以从未暴露。
+修法：在 `mcp/handlers.py` 的 `dispatch()` 里每次调用前调 `_sweep_sessions(rt)`，用非阻塞锁保证多线程下
+同一时刻只有一个清扫在跑（拿不到锁就跳过本轮，不把清扫排成调用延迟）；
+清扫异常只写 stderr —— 清扫是维护性工作，失败不该把用户正常调用变成 error，
+但也绝不能静默无痕。远程另加 60s 后台线程：没人调用就永远不清扫，故它是必需的、不是可选优化。
+
+**Bug 2：serve-http 超过 2 个并发客户端就崩。** 所有请求线程共用同一个 `Server`（因而共用同一个懒加载 SQLite 连接），
+而 `store/db.py` 的 `sqlite3.connect()` 没传 `check_same_thread=False`（默认 True）。实测：
+
+| 并发客户端 | 结果 |
+|---|---|
+| 1 / 2 | 全成功 |
+| 4 / 8 / 16 | 大量 `ok:false` + `internal`，details 为 `SQLite objects created in a thread can only be used in that same thread` |
+
+修法：连接开 `check_same_thread=False`，**但以 serialized 编译为前提**——`sqlite3.threadsafety >= 3`，
+不满足时 `connect()` **显式报错拒绝服务**。放开后在非 serialized 构建上会静默走向
+随机数据竞争，那才是零假成功的真正反例。写路径由 SQLite 自身保证：WAL + `busy_timeout=30000`，
+`isolation_level=None`（autocommit）下每条语句各自成事务，不会跨线程拼出半个事务。
+
+**Bug 3（独立于 Bug 2）：accept backlog 只有 5。** `socketserver.TCPServer.request_queue_size` 默认 5，`ThreadingHTTPServer` 继承之。
+修完 Bug 2 以为并发已解决，实测 n=32 全通、**n=64 起大批 `ConnectionResetError(104)`**（内核直接丢连接，与 SQLite 无关）。
+修法：`class _Server(ThreadingHTTPServer): request_queue_size = 128`。
+两个 bug 独立：只修连接不管 backlog，n>=64 仍会随机被重置。
+
+**修复后实测（真 HTTP、每客户端 1 次请求）：n=8/16/32/64/128/200 全部全通。**
+
+**§4.8「何时才值得换 Go/Rust」的判断依据，现在有了实测答案：不需要换。**
+三个前提里「单机支撑几十个并发 agent」此前**根本不成立**（连 4 个都不到），现在 n=200 成立；
+剩下的 GIL / 内存占用**实测不是瓶颈**（瓶颈仍是嵌入模型，而非语言）；即便将来真要换，按 §4.8 也只换边缘网关层。结论：**维持 Python。**
+
+**残余风险**：① 「几十个并发」只验到 200 **并发读**，写路径（`commit_report` 等）在
+autocommit + WAL 下靠 busy_timeout 兜底，未做写压测；② `request_queue_size = 128` 在**超过 128
+的同时建连**时仍会溢出（属内核行为，可按需调大）；③ 多进程 / 多副本部署未验证，届时要重新确认
+写冲突与清扫的幂等性。详见 `tech-design.md` §4.6.1 与 `operations.md` §1.1。
