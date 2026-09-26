@@ -344,7 +344,7 @@ TTL 到期（`MEMEX_SESSION_TTL_SECONDS`，默认 2 小时）由**下一次任�
 `sentence-transformers` 同理不缺模板引擎：**用 Python 标准库 `string.Template` + 手写 HTML**，
 或引入 `jinja2`（已在依赖树里，因为很多 ML 包传递依赖它）。
 
-**不引入 Node / Vite。** 站点只是一页仓库目录（C11），用不着前端框架——
+**不引入 Node / Vite。** 站点是目录页 + 单仓详情 + 模式页（C11），用不着前端框架——
 引入 Node 会把「一个 Python 包」变成「两个工具链」，与选型理由矛盾。
 
 **产物文件名必须自守。** 库里的 `repos.repo_id` 是 `TEXT PRIMARY KEY`，没有 DDL 约束；
@@ -357,6 +357,16 @@ TTL 到期（`MEMEX_SESSION_TTL_SECONDS`，默认 2 小时）由**下一次任�
 所以 `a/b`（需改写，被跳过）与 `a_b`（原样落盘）不可能写到同一个文件。
 `repos` 计数也相应只算真正导出的仓数，与首页显示的仓库数一致。
 
+**站点有两层，不是只有一页目录（C11 改写后）。** 单仓页的数据从 `analyses.report_json`
+读，不从 `cards` 表反查：`report_json` 的 `features[].cards[]` 自带 `evidence[]`（含 `symbol`）
+与 `tags[]`，而 `cards` 表只有 `code_spans_json` 的行号；两个源交叉 join 会让同一张卡片
+有两套字段。`report_md` 不全文渲染，收进末尾 `<details>` 的预格式文本作为产物快照。
+跨仓模式单独成页（`patterns.html`）——模式的成员是「来自不同仓的卡片」，这个视角在
+单仓页里根本不存在。
+
+**不做全局卡片浏览器。** 卡片归属功能、功能归属仓库，跨仓侧的单位是「模式」。
+要做跨卡片的语义召回（混排 + rerank + 三通道 RRF），那是 MCP 的活；
+静态产物做不到，也不该伪造一个像样的假检索框。
 ### 2.8 VibeCraft 存量实现对照与回填（G12）
 
 #### 2.8.1 存储对照

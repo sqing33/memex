@@ -91,12 +91,18 @@ def _seed_analysis(paths, repo_id, *, aid=None, **cols):
             "counts": '{"features": 2, "cards": 5, "evidence": 3}',
             "quality": '{"code_mismatch": 0}',
             "reindex_state": "indexed",
+            # C11 改写后单仓页要渲染报告正文，默认给一份空字典：
+            # 老的「只有计数块」那些测试不用改就能继续过，
+            # 想验证正文渲染的测试自己传 report=。
+            "report": "{}",
+            "md": "",
         }
         row.update(cols)
         conn.execute(
             "INSERT INTO analyses(analysis_id, repo_id, commit_sha, contract_version, depth, "
             "analyst, producer, status, created_at, counts_json, quality_json, "
-            "finished_at, reindex_state) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "finished_at, reindex_state, report_json, report_md) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 aid or ("an-" + repo_id.replace("/", "")),
                 repo_id,
@@ -111,6 +117,8 @@ def _seed_analysis(paths, repo_id, *, aid=None, **cols):
                 row["quality"],
                 row["created_at"],
                 row["reindex_state"],
+                row["report"],
+                row["md"],
             ),
         )
     finally:
@@ -319,7 +327,9 @@ def test_page_filename_collision_is_contained_by_skipping(paths, tmp_path):
 
     assert res["skipped_repo_ids"] == ["a/b"], res["skipped_repo_ids"]
     assert res["repos"] == 2, "a_b 与 good 落盘，a/b 跳过"
-    assert [Path(f).name for f in res["files"]] == ["index.html", "a_b.html", "github.com__o__good.html"]
+    assert [Path(f).name for f in res["files"]] == [
+        "index.html", "patterns.html", "a_b.html", "github.com__o__good.html"
+    ]
     assert (out / "a_b.html").exists(), "a_b 是合法 id，原样落盘"
 
 def test_analysis_block_shows_analyst_not_model(paths, tmp_path):
