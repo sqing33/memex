@@ -160,12 +160,12 @@ topic 集：`analyze-flow`（建库全流程）/ `report-contract`（报告 sche
 |---|---|
 | 仓库全名 / URL / 描述 | `repos` |
 | 语言 / stars / license | `repos`（fetch 时抓取） |
-| 已分析 commit / 分析时间 / 模型 | `analyses` |
+| 已分析 commit / 分析时间 / 分析者 | `analyses` |
 | 功能数 / 卡片数 / 证据数 | `analyses` 的 counts |
 | 质量指标（`code_mismatch` 等） | `analyses` 的 quality |
 | 是否 `stale`（远端有新 commit） | 见 B8 |
 | 知识库总览（仓数 / 卡数 / 模式数） | `stats` |
-
+- 补记（原表写的是「模型」，是错的）：`analyses` **没有模型列**。索引模型是**全库唯一**的 `meta.embedder`（reindex 时原子切换，见本文件「单索引模型」一节），不是每次分析各记一个；每次分析各记一个模型会让「同一次分析的向量与查询用不同模型」这种混模型错误无法被 G11 守卫发现。这一行真正能显示的是 `analyst`——**谁**做的分析（如 `dsh-mcp-client`）。
 - 定位是**「我收过哪些仓、它们长什么样」的一眼总览**，不是知识库的完整前端。
 - 报告与卡片的具体内容不在此页——需要时点进仓库，或直接用 MCP 召回（那才是主入口）。
 - **不做客户端搜索框**：仓库数量天然有限（几十个量级），一页列完即可，无需检索。

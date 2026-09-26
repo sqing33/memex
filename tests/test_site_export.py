@@ -321,3 +321,23 @@ def test_page_filename_collision_is_contained_by_skipping(paths, tmp_path):
     assert res["repos"] == 2, "a_b 与 good 落盘，a/b 跳过"
     assert [Path(f).name for f in res["files"]] == ["index.html", "a_b.html", "github.com__o__good.html"]
     assert (out / "a_b.html").exists(), "a_b 是合法 id，原样落盘"
+
+def test_analysis_block_shows_analyst_not_model(paths, tmp_path):
+    """分析块展示「分析者」（analyst），不展示「模型」——analyses 表没有模型列。
+
+    decisions.md 已定：`meta.embedder` 是**全库唯一**索引模型（reindex 时原子切换），
+    不是每次分析各记一个；`analyst` 记的是谁做的分析（如 dsh-mcp-client）。
+    所以旧文档那一行「已分析 commit / 分析时间 / 模型 ← analyses」本身就是错的：
+    analyses 里根本没有模型这一列，写进文档只会让人去找一个不存在的字段。
+    """
+    from memex.site.render import export_site
+
+    _seed_repo(paths, "github.com__a__b", full_name="a/b")
+    _seed_analysis(paths, "github.com__a__b", aid="an-analyst", analyst="dsh-mcp-client")
+    out = tmp_path / "site"
+    export_site(paths, out=str(out))
+    page = _read(out / "github.com__a__b.html")
+    assert "分析者" in page
+    assert "dsh-mcp-client" in page
+    # 旧文档承诺的「模型」字段在 analyses 里不存在，页面不得凭空造一个
+    assert "模型" not in page, "页面出现了 analyses 里根本没有的「模型」字段"
