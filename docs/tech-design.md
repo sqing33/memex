@@ -141,6 +141,8 @@ $MEMEX_HOME/                    （默认 ~/.memex）
 ④ 跨仓模式（聚类产物，可从 cards 重建）
   patterns(pattern_id PK, key UQ, title, tags_json, card_count, repo_count)
   pattern_members(pattern_id FK, card_id FK, score, PK(pattern_id, card_id))
+                                    score ← ★ 该成员与簇内所有其他成员的**最小**余弦
+                                       （complete-linkage 的最紧一环，可直接与阈值对照）
   pattern_intents(pattern_id FK, text)        ← 非对称因子分解出的「意图探针」向量文本
 
 ⑤ 检索（可重建，不进备份的必需集）

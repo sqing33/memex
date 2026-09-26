@@ -810,14 +810,51 @@ A~C=0.5、阈值 0.8，旧实现给 `[3]`，新实现给 `[1, 2]`）。
 所以 `recluster` 必须按 `card_id` 排序传入以保确定性（`test_cluster_cards_is_deterministic` 锁定）。
 V1 语料规模（27 卡）下开销可忽略。
 
-**当前语料的诚实结论。** 阈值定案后重跑两仓 `recluster` 仍得 `patterns=0`，
-`clusters_seen=22`。这不是缺陷：Doraemon 与 PTNexus 是两个技术栈无交集的项目
+**V1 语料的诚实结论（已被 V2 推翻，见下）。** 阈值定案后重跑两仓 `recluster` 仍得
+`patterns=0`，`clusters_seen=22`。当时判为正确输出：Doraemon 与 PTNexus 技术栈无交集
 （Node.js+Express+MySQL vs Go+Vue+多方言 SQL），语料里确实没有可成对的跨仓机制。
-`patterns=0` 是正确输出，不是空实现——降阈值会立刻产出上面那批噪声簇。
+
+**V2 五语种实测：0.60 确实出真模式，但精度不够（G24 第一次修正）。**
+语料扩到 5 个仓、78 张可复用卡（JS/Vue+Express `Doraemon`、Go/Vue `PTNexus`、
+Python `urllib3`、Java+Kotlin `okhttp`、Rust `axum`），`recluster` 得
+`patterns=5, clusters_seen=54, cards_considered=78`。5 个簇**全部跨语言**且都落在真实机制上：
+
+| pattern_key | 标题 | 配对 |
+| --- | --- | --- |
+| `cluster-d082ca95d8` | 重试与后继请求收敛到同一循环，恢复判定集中在一处 | urllib3 + okhttp（3 卡） |
+| `cluster-06d962ae50` | 服务端指示优先于本地退避，且指示值本身也被钳制 | urllib3 + okhttp |
+| `cluster-7e5026593a` | 退避时长由「连续错误段」而非「累计次数」决定 | urllib3 + okhttp |
+| `cluster-c8049ad61d` | 逐层剥包装再对成因下转 | PTNexus + axum |
+| `cluster-1f29bc3d44` | 远端预检查与本地统计的双层回退门 | PTNexus + urllib3 |
+
+**但 5 簇中 4 簇的成员对并非同一机制。** 逐簇算成员两两余弦（`reports/diag_sim.py`），
+全部落在 0.770–0.785 的窄带里，远高于 0.60 阈值；可人工核对成员语义，只有 1 簇
+（`cluster-d082ca95d8`）三张卡确实在讲同一件事。其余如「服务端指示优先于本地退避」
+被并上了 okhttp 的「读阶段已发出的请求不重试」——两者都在讲重试，但**不是同一个机制**。
+
+**根因是 `pattern_members.score` 曾被写死为 `1.0`。** 该列是聚类质量唯一的对外信号
+（`list_patterns` / `get_report` 都靠它判断簇质量），写死 1.0 等于抹掉全部信息：
+读者无法区分「三卡互相 0.78」与「三卡互相 0.99」。已修正为**该成员与簇内所有其他成员的
+最小余弦**——正是 complete-linkage 决定它能否留在簇里的那个最紧的一环，可直接与阈值对照。
+回归测试 `test_recluster_records_real_member_similarity` 锁定（seed 两段**不同**机制文本，
+断言 score 与真实余弦一致且不等于 1.0）。修正后实测 5 簇的成员 score 全部落在
+0.770–0.785 区间——**分数暴露了「都过阈值但语义不同」这一事实**，这正是它该干的事。
+
+**因此 0.60 维持不变，但 G24 的结论要修正为「召回可用、精度不足」。** 现状是
+`pattern` 的价值在**候选发现**（告诉你这两家都在处理重试，值得去看），不在**直接当结论用**。
+下一步（V4）要么给 `list_patterns` 加 score 门槛、要么引入 rerank（G25）提升同义判别力；
+在此之前 `list_patterns` 的簇标题必须被当作「线索」而非「已证实的机制等价」。
 
 **残余风险。** 阈值强依赖嵌入模型，换模型必须重测（`decision` 里「recall 旧代码的 0.62 已作废」
 同理）。`DEFAULT_SIM_THRESHOLD` 是模块常量，未开放环境变量：V1 只有一个模型，
 过度可配会让人随手调低造出假知识；V4 接多模型时再按模型分档。
+
+**V2 追加的残余风险：0.77–0.785 的成员相似度带过窄，说明该 embedding 在
+「同一大主题下的不同机制」上判别力不足。** 阈值 0.60 只能挡住跨主题噪声（0.50 上下），
+挡不住同主题内的近义噪声（0.78 上下）。这不是调阈值能解决的——把阈值提到 0.78 以上会丢掉
+`cluster-c8049ad61d` 这类真跨语言配对（`PTNexus`「空标题用哨兵错误而非空结果」
+与 `axum`「逐层剥包装再对成因下转」实测 0.770，主题不同但机制同构）。
+只有换更强的 rerank（G25）或引入机制维度的额外特征（如下游询问「并发时怎么处理」）才能分开。
 
 ---
 

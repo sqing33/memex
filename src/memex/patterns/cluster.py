@@ -152,6 +152,28 @@ def cluster_cards(
     return clusters
 
 
+def _member_scores(cluster: list[dict[str, Any]]) -> dict[str, float]:
+    """每个成员的 score = 它与簇内**所有**其他成员的最小余弦。
+
+    取最小值而非与簇心的相似度或与任一成员的相似度，因为 complete-linkage 的
+    准入判据就是「与每个已有成员都 >= threshold」（见 cluster_cards）——score
+    记录的正是那个决定它能否留在簇里的最紧的一环，可直接与阈值对照来判断簇质量。
+
+    单成员簇返回 1.0：它没有对照物（min_repos>=2 下这类簇本就会被 _keep 丢弃）。
+    """
+    if len(cluster) < 2:
+        return {c["card_id"]: 1.0 for c in cluster}
+    scores: dict[str, float] = {}
+    for i, a in enumerate(cluster):
+        worst = 1.0
+        for j, b in enumerate(cluster):
+            if i == j:
+                continue
+            worst = min(worst, cosine(a["vec"], b["vec"]))
+        scores[a["card_id"]] = worst
+    return scores
+
+
 def _keep(cluster: list[dict[str, Any]], groups_by_repo: dict[str, str]) -> bool:
     return len({groups_by_repo.get(c["repo_id"], c["repo_id"]) for c in cluster}) >= MIN_REPOS
 
@@ -190,10 +212,11 @@ def recluster(conn: sqlite3.Connection, cfg: Config, *, threshold: float = DEFAU
             "INSERT INTO patterns(pattern_id, key, title, tags_json, card_count, repo_count) VALUES(?,?,?,?,?,?)",
             (pattern_id, key, title, json_dumps(tags), len(card_ids), len(repo_ids)),
         )
+        scores = _member_scores(cluster)
         for c in cluster:
             conn.execute(
                 "INSERT OR REPLACE INTO pattern_members(pattern_id, card_id, score) VALUES(?,?,?)",
-                (pattern_id, c["card_id"], 1.0),
+                (pattern_id, c["card_id"], scores[c["card_id"]]),
             )
         for intent in _cluster_intents(conn, card_ids):
             conn.execute("INSERT INTO pattern_intents(pattern_id, text) VALUES(?,?)", (pattern_id, intent))

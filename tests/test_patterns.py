@@ -12,7 +12,7 @@ from memex.core import Config  # noqa: E402
 from memex.patterns import recluster  # noqa: E402
 from memex.patterns.cluster import cluster_cards  # noqa: E402
 from memex.store import db as store_db  # noqa: E402
-from memex.embeddings import hash_embedder, pack_vector  # noqa: E402
+from memex.embeddings import cosine, hash_embedder, pack_vector, unpack_vector  # noqa: E402
 
 
 def test_cluster_cards_pure():
@@ -114,3 +114,40 @@ def test_cluster_cards_is_deterministic():
     two = sorted(sorted(c["card_id"] for c in cl) for cl in cluster_cards(list(cards), threshold=0.9))
     assert one == two
     assert one == [["a", "c"], ["b"]]
+
+
+def test_recluster_records_real_member_similarity(tmp_path, monkeypatch):
+    """成员 score 必须是真实相似度，不是写死的 1.0（V2 五语种实测暴露）。"""
+    monkeypatch.setenv("MEMEX_HOME", str(tmp_path / "home"))
+    cfg = Config.from_env()
+    store_db.init_db(cfg.paths, embedder_spec="hash:64")
+    conn = store_db.connect(cfg.paths.db)
+    emb = hash_embedder(64)
+    # 两段不同的机制文本：余弦 < 1.0，才能与写死的 1.0 区分开
+    _seed_repo_and_card(conn, emb, repo_id="org__a", identity="org/a",
+                        mech="Bounded retry with exponential backoff across remote calls.")
+    _seed_repo_and_card(conn, emb, repo_id="org__b", identity="org/b",
+                        mech="Cache entries evicted by an LRU journal rebuilt atomically.")
+    recluster(conn, cfg, threshold=0.0)
+
+    rows = conn.execute("SELECT score FROM pattern_members").fetchall()
+    assert rows, "应当生成 pattern_members"
+    sims = [r["score"] for r in rows]
+    assert all(s != 1.0 for s in sims), f"score 不应写死 1.0，实际={sims}"
+    # score 必须在 [0, 1] 且与阈值 0.0 下的真实余弦一致
+    cards = conn.execute(
+        "SELECT card_id, mechanism_desc FROM cards WHERE reusable = 1 ORDER BY card_id"
+    ).fetchall()
+    vecs = {}
+    for c in cards:
+        r = conn.execute("SELECT vec FROM chunk_vectors WHERE chunk_id = ?",
+                         ("card~" + c["card_id"],)).fetchone()
+        vecs[c["card_id"]] = unpack_vector(r["vec"])
+    for row in conn.execute("SELECT card_id, score FROM pattern_members").fetchall():
+        assert -1e-6 <= row["score"] <= 1.0 + 1e-6
+        other = [cid for cid in vecs if cid != row["card_id"]]
+        if other:
+            expect = cosine(vecs[row["card_id"]], vecs[other[0]])
+            assert abs(row["score"] - expect) < 1e-4, (
+                f"score={row['score']} 与真实余弦 {expect} 不符"
+            )
