@@ -16,3 +16,10 @@ repos/
 
 # Doraemon acceptance scratch: report build chain, not a deliverable
 reports/
+
+# Web (Node prerender, tech-design 2.7). 仓库根的 build/ 与 dist/ 是无锚定的
+# 通配，会把 web/build/（预渲染脚本——源码）一起吞掉，所以这里显式取反。
+node_modules/
+site-data.json
+web/dist/
+!web/build/

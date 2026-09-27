@@ -1,0 +1,27 @@
+{
+  "name": "memex-site",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "memex static site rendering side (tech-design.md 2.7) - data comes from site-data.json, never SQLite",
+  "scripts": {
+    "build": "vite build && node build/prerender.mjs",
+    "build:renderer": "vite build",
+    "prerender": "node build/prerender.mjs",
+    "dev": "vite",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/react": "^18.3.17",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.7.2",
+    "vite": "^5.4.11"
+  }
+}

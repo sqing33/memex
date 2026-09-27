@@ -189,6 +189,18 @@ def commit_report(
     except Exception as exc:  # noqa: BLE001 聚类是派生层，失败不致命
         cluster_info = {"error": str(exc)}
 
+    # 站点数据 dump（派生层，与聚类同级）：用户要求「不敲命令也能看到新仓」。
+    # 只更新 site-data.json（纯 Python、不碰模型，5 仓约 50ms）；React 排版要 Node，
+    # 留在部署侧（decisions.md C11 改写二）。同样**不致命**：站点是展示层，
+    # 不能因为它把已校验通过、code_mismatch=0 的分析变成失败。
+    site_info: dict[str, Any] | None = None
+    try:
+        from ..site.dump import dump_site_data
+
+        site_info = dump_site_data(cfg.paths)
+    except Exception as exc:  # noqa: BLE001 站点是派生层，失败不致命
+        site_info = {"error": str(exc)}
+
     return {
         "analysis_id": analysis_id,
         "already_analyzed": False,
@@ -200,6 +212,7 @@ def commit_report(
         "code_mismatch": 0,
         "counts": counts,
         "patterns": (cluster_info or {}).get("patterns"),
+        "site": site_info,
     }
 
 

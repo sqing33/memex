@@ -341,32 +341,79 @@ TTL 到期（`MEMEX_SESSION_TTL_SECONDS`，默认 2 小时）由**下一次任�
 
 ### 2.7 静态站点怎么生成
 
-`sentence-transformers` 同理不缺模板引擎：**用 Python 标准库 `string.Template` + 手写 HTML**，
-或引入 `jinja2`（已在依赖树里，因为很多 ML 包传递依赖它）。
+站点渲染在 V5 收尾时被换过一次（见 `decisions.md` C11「改写二」）。**换的是排版那一半，
+不是数据来源**：查库仍然在 Python，仍然是那几条 SQL，只是落盘产物从「`.html`」变成
+「`site-data.json`」，排版交给 `web/` 里的 React 预渲染。
 
-**不引入 Node / Vite。** 站点是目录页 + 单仓详情 + 模式页（C11），用不着前端框架——
-引入 Node 会把「一个 Python 包」变成「两个工具链」，与选型理由矛盾。
+#### 2.7.1 职责边界：一条 JSON 就是全部接口
 
-**产物文件名必须自守。** 库里的 `repos.repo_id` 是 `TEXT PRIMARY KEY`，没有 DDL 约束；
-`export_site` 把它拼进 `out/<repo_id>.html` 时，脏值（如 `evil/../../x`）会让整个导出抛
-`FileNotFoundError` 中途崩掉。正常入口造不出脏值，但那是调用方的卫生，不是被调用方的护栏——
-因此 `export_site` 自己重写：重写后与原值不一致（或写不进文件名）的仓**跳过并在返回值
-`skipped_repo_ids` 里逐个列出**，既不就地改库也不写可疑文件（脏数据要显式暴露，不要顺手洗白）。
+```
+memex.db ──[Python: dump_site_data]──> site-data.json ──[Node: npm run build]──> *.html
+            零依赖，~50ms，不碰模型            单文件契约          秒级，只在构建时跑
+
+`site-data.json` 与 `*.html` **落同一目录**（`--out` 缺省 `$MEMEX_HOME/site`）：
+数据与产物分家会让部署方多记一个路径，`--build` 还得再显式传一次 `MEMEX_SITE_OUT`，
+多一个能配错的旋钮。`web/dist/` 是 vite `emptyOutDir` 的编译输出，**每次 build 会被清空**，
+不能拿它当产物目录。
+```
+
+`site-data.json` 带 `schema_id = memex/site/1`，是 Python 与 React 之间**唯一的**接口：
+React 侧不连 SQLite、不 import Python、不复制查询逻辑。
+**Node 工具链不进 Python 包**——`pyproject.toml` 的 `dependencies = []` 保持空，
+Python 用户装完 memex 依然零依赖可跑 MCP；只有要发网站的人才需要 `npm install`（见 `web/`）。
+这条边界宁可多一道 `npm ci`，也不把 `node_modules` 混进 `uv.lock` 管不到的地方。
+
+`report_json` **原样内联**进 JSON，不做前端专用整形：`report.schema.json` 已经是那份数据的契约，
+再造一层前端形状只会多一个漂移点（刚在 C11 修过的 `_as_dict` 静默吞数据，就是漂移点的代价）。
+
+#### 2.7.2 预渲染而不是 SPA
+
+`react-dom/server` 的 `renderToString` 逐页出 HTML，构建完是**纯静态目录**，
+`file://` 直接打开也能用。不做客户端路由、不做 `/repo/:id` 路径——
+`repo_id` 本身含 `/`（`github.com/sqing33/PTNexus`），做路由要额外编码，编码错了就是死链。
+保持**扁平 `.html` + 相对链接**。
+CSS 走单文件内联（`web/build/` 收集）。**产物里没有 JS**：折叠用原生 `<details>`、
+锚点用普通 `<a href="#…">`，零 JS 就能用——这正是选预渲染而非 SPA 换来的好处，不该让渡掉。
+同时**不引外部 CDN 资源**，站点要能离线翻阅、当归档快照，`file://` 打开即完整可用。
+
+#### 2.7.3 深链锚点：跨仓跳到具体卡片
+
+`report_json` 的卡片**没有 id**（只有数组下标），但模式页要能跳到
+「这张卡片在那个仓的第几屏」。dump 时按位置生成 `f{功能下标}-c{卡片下标}`，
+**Python 与 React 两端用同一套规则**。`analyze/rows.py` 的
+`card_id = f"card_{{fid}}_{{ci}}"` 用的就是同一套下标，所以模式成员能从 `card_id` 反解出下标，
+锚点不会失效——这是「锚点规则只能写一次」的硬要求。
+
+#### 2.7.4 产物文件名必须自守
+
+库里的 `repos.repo_id` 是 `TEXT PRIMARY KEY`，没有 DDL 约束；把它拼进 `out/<repo_id>.html` 时，
+脏值（如 `evil/../../x`）会让整个导出抛 `FileNotFoundError` 中途崩掉。正常入口造不出脏值，
+但那是调用方的卫生，不是被调用方的护栏——因此 dump/构建自己重写：重写后与原值不一致
+（或写不进文件名）的仓**跳过并在 `site-data.json` 的 `skipped_repo_ids` 里逐个列出**，
+既不就地改库也不写可疑文件（脏数据要显式暴露，不要顺手洗白）。
 
 防碰撞靠的正是这条跳过规则：真正被写盘的那批 `repo_id` 上重写是**恒等映射**，
 所以 `a/b`（需改写，被跳过）与 `a_b`（原样落盘）不可能写到同一个文件。
 `repos` 计数也相应只算真正导出的仓数，与首页显示的仓库数一致。
 
-**站点有两层，不是只有一页目录（C11 改写后）。** 单仓页的数据从 `analyses.report_json`
-读，不从 `cards` 表反查：`report_json` 的 `features[].cards[]` 自带 `evidence[]`（含 `symbol`）
-与 `tags[]`，而 `cards` 表只有 `code_spans_json` 的行号；两个源交叉 join 会让同一张卡片
-有两套字段。`report_md` 不全文渲染，收进末尾 `<details>` 的预格式文本作为产物快照。
-跨仓模式单独成页（`patterns.html`）——模式的成员是「来自不同仓的卡片」，这个视角在
-单仓页里根本不存在。
+#### 2.7.5 页面范围（三页，不做第四页）
+
+| 页 | 内容 | 数据源 |
+|---|---|---|
+| `index.html` | 仓库清单 + 总览 | `repos` / `analyses` / `stats` |
+| `<repo_id>.html` | 逐次分析：一句话特征、入口、特性、五轴原理、卡片全文与证据路径 | `analyses.report_json` |
+| `patterns.html` | 跨仓模式：成员卡片、分值、来源仓 | `patterns` / `pattern_members` / `cards` |
+
+单仓页的卡片区从 `report_json` 的 `features[].cards[]` 取，**不另跟 `cards` 表交叉 join**：
+`report_json` 里已带 `evidence[]`（含 `symbol`）与 `tags[]`，表里的 `code_spans_json` 只有行号。
+合并两个源会造成「同一张卡片两套字段」的不一致。
+`report_md`（每仓 12–23K 字符）不全文渲染，收进页面末尾折叠区作为产物快照。
+跨仓模式单独成页——模式的成员是「来自不同仓的卡片」，这个视角在单仓页里根本不存在。
 
 **不做全局卡片浏览器。** 卡片归属功能、功能归属仓库，跨仓侧的单位是「模式」。
 要做跨卡片的语义召回（混排 + rerank + 三通道 RRF），那是 MCP 的活；
 静态产物做不到，也不该伪造一个像样的假检索框。
+
 ### 2.8 VibeCraft 存量实现对照与回填（G12）
 
 #### 2.8.1 存储对照

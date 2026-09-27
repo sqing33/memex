@@ -136,7 +136,7 @@ git clone https://$TOKEN@github.com/me/private.git
 | `memex serve-http --host 127.0.0.1 --port 8931` | 远程 Streamable HTTP 形态 |
 | `memex reindex [--embedder X] [--repo REPO_ID ...]` | 重算 chunk 向量并更新 `meta`（换模型后用，G11）；`--repo` 可重复，只重建指定仓（`§5.3`）；全量重建才清空三张派生表 |
 | `memex migrate [--to X] [--dry-run]` | 真源层迁移（G9）；`--dry-run` 只打印计划 |
-| `memex export-site [--out DIR]` | 静态目录页 |
+| `memex export-site [--out DIR] [--build]` | 导出站点数据并出静态页（`§5.4`）。`--out` 缺省 `$MEMEX_HOME/site`。**Python 只负责把库导成 `site-data.json`**，排版由 `web/` 的 React 预渲染做（`web/dist` 是 vite 编译中间目录，不在 Python 包内，Python 依赖仍为空）。加 `--build` 才顺带跑 `npm run build`（需先 `cd web && npm ci`）；构建失败**只报不抛**，命令仍返回 0 并在 `site.build_error` 里带原因——站点是展示层，**不得因为它拖垮已提交的分析** |
 | `memex stats` | 知识库总览（含按 producer 分组的质量，G21） |
 | `memex forget-repo <repo_id> --yes` | CLI 版删除（G8）；MCP 侧是 `forget_repo` |
 | `memex import-vibecraft <path> [--dry-run]` | 从 VibeCraft 回填（G12）；**只读** VibeCraft 库；强制过 `validate_report` + 从真实文件重切证据；过不了的卡片**丢弃并计数**；**回填时同一次调用就把索引建好**（`indexed_analyses` 计数），不必再手动 `reindex`；`--dry-run` 只出报告不落库 |
@@ -282,6 +282,27 @@ print(detect_language('/root/.memex/repos/github.com__tokio-rs__axum'))
 `embedder_mismatch_repos`（其余 embedder 与 meta 不一致的仓），否则撞上 G11 的
 「混模型库直接报 conflict」，用户得自己猜是哪几个仓。
 
+### 5.4 站点构建：数据归 Python，排版归 Node
+
+```bash
+memex export-site                  # 只导 site-data.json（纯 Python，零依赖）
+memex export-site --build          # 导完顺带跑 npm run build，出 *.html
+memex export-site --out /tmp/site  # 指定产物目录（默认 $MEMEX_HOME/site）
+```
+
+`export-site` 拆成两步是有意的：`site-data.json`（`schema_id: memex/site/1`）是 Python 与
+React 之间**唯一**的接口，也是 CI 里可断言的契约。**构建失败不抛异常**——
+命令仍返回 0，把原因放在返回值的 `site.build_error` 里。理由很直白：站点是展示层，
+一个 CSS 编译错不该把已经校验通过、`code_mismatch=0` 的分析变成失败（G3 的零假成功是
+对分析而言，不是对网页而言）。
+
+`commit_report` 落库后会顺带重新 dump 一次（≈50ms，不碰模型），所以**数据**永远是新的；
+但 HTML 是快照，**不会自己重排**——要么在部署流水线里跑 `--build`，要么手敲一次。
+
+`.gitignore` 里有两条必须知道的坑：仓库根的 `build/` 与 `dist/` 是通配到所有子目录的，
+会把 `web/build/`（预渲染脚本，**是源码**）和 `web/dist/`（vite 编译中间目录）一起吞掉，
+所以文件末尾用 `!web/build/` 显式取反。
+
 ## 6. 常见故障与处置
 
 | 现象 | 原因 | 处置 |
@@ -300,3 +321,5 @@ print(detect_language('/root/.memex/repos/github.com__tokio-rs__axum'))
 | 检索报 `sqlite3.OperationalError: table chunks has no column named ...` | 既有库没跑过迁移 | `memex migrate`（新版本会把这个裸异常兜成可读的 `conflict`，G9 补记） |
 | 启动报 schema 版本不符 | 库比代码新 | 拒绝启动是正确的；升级 memex 或从备份恢复（G9） |
 | 证据包 `truncated: true` | 超 `depth` 上限 | 换更大的 `depth`，或接受截断（已显式标注，G5） |
+| `export-site` 报 `node: not found` 或 `npm run build` 失败 | 站点构建要 Node，但 Python 侧不依赖它 | 不影响 MCP 与分析。先 `cd web && npm ci`；只想拿数据不想出页就**不加** `--build`，直接读 `site-data.json`（`schema_id: memex/site/1`） |
+| 站点页缺了刚分析完的仓 | 站点是**快照**，不是常驻服务 | 重跑 `memex export-site --build` 后刷新。commit 已自动重新 dump，所以数据是新的，只是没重新排版 |

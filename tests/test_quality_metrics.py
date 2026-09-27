@@ -18,11 +18,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from memex.contract.validator import validate_report  # noqa: E402
 
-REPO_ROOT = "/root/.memex/repos/github.com__tokio-rs__axum"
+# 不写死克隆路径：真库重建后目录名取决于当时怎么 clone（见 _axum_repo.py）
+from _axum_repo import require_axum_repo  # noqa: E402
 
 
 def _counts_of(report: dict) -> dict:
-    vres = validate_report(report, repo_root=REPO_ROOT)
+    vres = validate_report(report, repo_root=require_axum_repo())
     assert vres["is_valid"], vres["problems"]
     return vres["counts"]
 

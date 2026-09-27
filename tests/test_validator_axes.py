@@ -20,7 +20,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from memex.contract.validator import validate_report  # noqa: E402
 
 SRC = Path("/workspace/memex/reports/axum_report.json")
-REPO_ROOT = "/root/.memex/repos/github.com__tokio-rs__axum"
+
+# 真库重建后克隆目录名会变（memex 自己的 repo_id 风格 vs 手工 clone 的短名），
+# 所以不写死路径；找不到真实 axum 克隆时下面每个测试显式 skip。
+from _axum_repo import require_axum_repo  # noqa: E402
 AXES = ["runtime_control_flow", "data_flow", "state_lifecycle",
         "failure_recovery", "concurrency_timing"]
 BASE = json.loads(SRC.read_text())
@@ -35,7 +38,7 @@ def _problems(vres: dict) -> set[str]:
 
 
 def test_基准_真实axum报告本身合法():
-    vres = validate_report(_rep(), repo_root=REPO_ROOT)
+    vres = validate_report(_rep(), repo_root=require_axum_repo())
     assert vres["is_valid"], vres["problems"]
 
 
@@ -44,7 +47,7 @@ def test_五轴正文完全相同必须被拒():
     same = rep["features"][0]["principles"]["runtime_control_flow"]
     for ax in AXES:
         rep["features"][0]["principles"][ax] = same
-    vres = validate_report(rep, repo_root=REPO_ROOT)
+    vres = validate_report(rep, repo_root=require_axum_repo())
     assert not vres["is_valid"], "五轴一字不差必须被拒（urllib3 就是这样蒙混过关的）"
     assert "axis_reuse" in _problems(vres), _problems(vres)
 
@@ -57,14 +60,14 @@ def test_四轴相同只有一轴不同也必须被拒():
     for ax in AXES:
         rep["features"][0]["principles"][ax] = same
     rep["features"][0]["principles"]["failure_recovery"] = keep
-    vres = validate_report(rep, repo_root=REPO_ROOT)
+    vres = validate_report(rep, repo_root=require_axum_repo())
     assert not vres["is_valid"], "四轴雷同必须被拒"
     assert "axis_reuse" in _problems(vres), _problems(vres)
 
 
 def test_五轴各不相同仍然放行():
     """门禁不能误伤：真实报告本来就该过。"""
-    vres = validate_report(_rep(), repo_root=REPO_ROOT)
+    vres = validate_report(_rep(), repo_root=require_axum_repo())
     assert vres["is_valid"], _problems(vres)
 
 
@@ -74,6 +77,6 @@ def test_雷同判定忽略标点与空白差异():
     for ax in AXES:
         rep["features"][0]["principles"][ax] = same
     rep["features"][0]["principles"]["data_flow"] = same.replace("，", "、").replace("。", "！")
-    vres = validate_report(rep, repo_root=REPO_ROOT)
+    vres = validate_report(rep, repo_root=require_axum_repo())
     assert not vres["is_valid"], "只改标点不应绕过雷同判定"
     assert "axis_reuse" in _problems(vres), _problems(vres)

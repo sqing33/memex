@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+from typing import Any
 
 from . import __version__
 from .core import Config
@@ -41,8 +43,10 @@ def _build_parser() -> argparse.ArgumentParser:
     s.add_argument("--to", default=None)
     s.add_argument("--dry-run", action="store_true")
 
-    s = sub.add_parser("export-site", help="静态目录页")
+    s = sub.add_parser("export-site", help="导出站点数据（--build 顺带排版出 HTML）")
     s.add_argument("--out", default=None)
+    s.add_argument("--build", action="store_true",
+                   help="顺带跑 web/ 的 React 预渲染出 HTML（需先 cd web && npm ci）")
 
     sub.add_parser("stats", help="知识库总览（含按 producer 分组的质量，G21）")
 
@@ -63,6 +67,54 @@ def _config(home: str | None = None) -> Config:
 
         os.environ["MEMEX_HOME"] = home
     return Config.from_env()
+
+
+def _export_site(out: str | None, *, build: bool) -> dict[str, Any]:
+    """export-site：导 site-data.json，可选顺带跑 React 预渲染。
+
+    构建失败**不抛**、命令仍返回 0，原因只进返回值的 site.build_error。
+    理由（decisions.md C11 改写二）：站点是展示层，一个 CSS 编译错不该把
+    已经校验通过、code_mismatch=0 的分析变成失败；反过来，失败必须显式
+    出现在返回值里——静默跳过等于骗人说「站点是新的」。
+    """
+    import subprocess
+    from pathlib import Path
+
+    from .site.dump import dump_site_data
+
+    cfg = _config()
+    res = dump_site_data(cfg.paths, out=out)
+    if not build:
+        return res
+
+    web_dir = Path(__file__).resolve().parents[2] / "web"
+    if not web_dir.is_dir():
+        res["site"] = {"built": False, "build_error": "找不到 web/ 目录（源码树形态才带）"}
+        return res
+    # 数据文件与产物目录用环境变量传给 prerender.mjs，`npm run build`
+    # 才能保持成一条不带参数的普通脚本（package.json 里不用写死路径）。
+    env = {
+        **os.environ,
+        "MEMEX_SITE_DATA": str(Path(res["data_file"]).resolve()),
+        "MEMEX_SITE_OUT": str(Path(res["out_dir"]).resolve()),
+    }
+    try:
+        proc = subprocess.run(
+            ["npm", "run", "build", "--silent"],
+            cwd=str(web_dir), capture_output=True, text=True, timeout=300, check=False, env=env,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        res["site"] = {"built": False, "build_error": str(exc)}
+        return res
+    if proc.returncode != 0:
+        res["site"] = {
+            "built": False,
+            "build_error": (proc.stderr or proc.stdout or "npm run build 失败").strip()[:2000],
+            "returncode": proc.returncode,
+        }
+        return res
+    res["site"] = {"built": True, "out_dir": res["out_dir"]}
+    return res
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -104,10 +156,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(res, ensure_ascii=False))
             return 0
         if cmd == "export-site":
-            from .site.render import export_site
-
-            cfg = _config()
-            res = export_site(cfg.paths, cfg, out=args.out)
+            res = _export_site(args.out, build=bool(getattr(args, "build", False)))
             print(json.dumps(res, ensure_ascii=False))
             return 0
         if cmd == "stats":
