@@ -1,5 +1,8 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ReactElement } from "react";
+// 必须在这里 import：vite 只会把它编译进 dist/assets/ 当入口被引用时。
+// 漏了这一行 styles.css 就只是仓库里的一个死文件，产物会静默变成裸 HTML。
+import "./styles.css";
 import { IndexPage } from "./pages/IndexPage";
 import { PatternsPage } from "./pages/PatternsPage";
 import { RepoPage } from "./pages/RepoPage";

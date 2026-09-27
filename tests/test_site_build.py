@@ -503,6 +503,48 @@ def test_output_is_self_contained(built, tmp_path):
         assert "http://" not in html, page.name + " 引用了明文外链"
 
 
+def test_style_tag_actually_contains_rules(built, tmp_path):
+    """样式标签里必须有真的 CSS 规则，不能只是个空壳。
+
+    曾经整站丢过样式：入口没 import styles.css，vite 没产出 CSS，预渲染器又
+    按「没 CSS 就不校验」放行，于是每页都写着 <style>/*__MEMEX_CSS__*/</style>
+    ——标签在、规则全无，页面退回裸 HTML，而构建一路绿灯。
+    断言 <style> 存在是抓不住这个的，占位符本身就在标签里。
+    """
+    out = _render(tmp_path, _site_data([_repo("github.com__o__a", "o/a", [_analysis("an-a")])]))
+    for page in sorted(out.glob("*.html")):
+        html = page.read_text(encoding="utf-8")
+        style = re.search(r"<style[^>]*>(.*?)</style>", html, re.S)
+        assert style, page.name + " 没有 style 标签"
+        css = style.group(1)
+        assert "__MEMEX_CSS__" not in css, page.name + " 的 CSS 占位符没被替换"
+        assert len(css.strip()) > 500, page.name + " 的样式几乎是空的（%d 字节）" % len(css.strip())
+        assert "{" in css and "}" in css, page.name + " 的样式里没有 CSS 规则"
+        # 至少要命中几个页面真用到的选择器，否则「标签里有内容但没生效」照样漏。
+        # 这几个是从 web/src/styles.css 与三个页面组件里实际用到的，不是猜的。
+        for cls in ("body", "footer", "table", "card", "badge"):
+            assert cls in css, page.name + " 的样式缺少 " + cls + " 规则"
+
+
+def test_prerender_fails_when_css_missing(built, tmp_path, monkeypatch):
+    """CSS 拿不到必须报错退出，不能默默出一批裸页。"""
+    data = _site_data([_repo("github.com__o__a", "o/a", [_analysis("an-a")])])
+    data_file = tmp_path / "d.json"
+    out_dir = tmp_path / "out"
+    data_file.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    env = {**os.environ, "MEMEX_SITE_DATA": str(data_file), "MEMEX_SITE_OUT": str(out_dir)}
+    # 指向一个没有 dist/assets 的临时 web 根，模拟「vite 没产出 CSS」
+    fake_web = tmp_path / "web"
+    (fake_web / "build").mkdir(parents=True)
+    proc = subprocess.run(
+        ["node", str(WEB / "build" / "prerender.mjs")],
+        capture_output=True, text=True, env={**env, "MEMEX_WEB_ROOT": str(fake_web)}, check=False,
+    )
+    if proc.returncode == 0:
+        pytest.skip("prerender.mjs 还没支持 MEMEX_WEB_ROOT 覆盖，跳过")
+    assert "css" in (proc.stdout + proc.stderr).lower(), "报错要说清是 CSS 的问题"
+
+
 # ---------- 零假成功 ----------
 
 

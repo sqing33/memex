@@ -10,11 +10,15 @@
  * 这样 package.json 里的 build 脚本不必写死任何路径，Python 侧也只需注入环境。
  */
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, existsSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const webRoot = join(here, "..");
+// 可被 MEMEX_WEB_ROOT 覆盖：测试要能造一个「没有 dist/assets」的场景来验证守卫，
+// 否则「CSS 缺失必须报错」这条就永远测不到。
+const webRoot = process.env.MEMEX_WEB_ROOT
+  ? resolve(process.env.MEMEX_WEB_ROOT)
+  : join(here, "..");
 
 const EXPECTED_SCHEMA = "memex/site/1";
 
@@ -38,10 +42,22 @@ function pathToFileUrl(p) {
 }
 
 function readCss() {
+  // 拿不到 CSS 就抛错，绝不返回空串：返回空串会让下面每页都写出裸 HTML，
+  // 而产物照样「构建成功」。曾经就这么丢过一次样式——入口忘了 import styles.css，
+  // dist/assets 压根不存在，守卫因为「没 CSS 可校验」而全部放行。
   const assetsDir = join(webRoot, "dist", "assets");
-  if (!existsSync(assetsDir)) return "";
+  if (!existsSync(assetsDir)) {
+    throw new Error(
+      `${assetsDir} 不存在。web/src/render.tsx 必须 import "./styles.css"，` +
+        "否则 vite 不会产出 CSS，页面会是没有样式的裸 HTML。",
+    );
+  }
   const css = readdirSync(assetsDir).find((f) => f.endsWith(".css"));
-  if (!css) return "";
+  if (!css) {
+    throw new Error(
+      `${assetsDir} 里没有 .css。同上：入口没 import 样式文件，构建出的是裸页面。`,
+    );
+  }
   return readFileSync(join(assetsDir, css), "utf8");
 }
 
@@ -67,17 +83,23 @@ async function main() {
   const { renderPage, CSS_PLACEHOLDER } = mod;
   const css = readCss();
 
-  const inline = (html) => (css ? html.replace(CSS_PLACEHOLDER, css) : html);
+  const inline = (html) => {
+    // 先替换再验：占位符在替换**前**当然存在，只有替换**后**还在才说明页面是裸的。
+    const out = html.replace(CSS_PLACEHOLDER, css);
+    if (out.includes(CSS_PLACEHOLDER)) {
+      throw new Error("CSS_PLACEHOLDER 替换后仍留在页面里，样式不会生效。");
+    }
+    if (css && !out.includes("<style>")) {
+      throw new Error("页面里没有 style 标签，CSS 无处安放。");
+    }
+    return out;
+  };
 
   mkdirSync(outDir, { recursive: true });
 
   const written = [];
   const write = (name, which, arg, repo) => {
     const html = renderPage(which, arg, repo);
-    // CSS 拿到了却没被替换 = 页面是裸的：宁可报错也不出一张没样式的产物
-    if (css && html.includes(CSS_PLACEHOLDER)) {
-      throw new Error(`${name} 里 CSS_PLACEHOLDER 没被替换，样式不会生效。`);
-    }
     writeFileSync(join(outDir, name), inline(html), "utf8");
     written.push(name);
   };
