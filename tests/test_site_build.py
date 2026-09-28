@@ -18,6 +18,8 @@ members_json 被当 dict 读成 {} 那种 bug，mock 一个都不会发现。
 
 Node 不可用时**显式 skip**（不是静默通过）：没有 Node 就等于没装前端工具链，
 这在该跑的机器上会被 CI 看见。构建一次约 2-5s，用 session 级 fixture 复用。
+判断「有没有 Node」用 shutil.which()，不是跑 `node --version` 看返回码——原因见
+_node_missing() 的注释（CI 上就是这么塌的）。
 """
 from __future__ import annotations
 
@@ -26,12 +28,43 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 WEB = Path(__file__).resolve().parents[1] / "web"
+
+
+# Node 缺席时不能靠 subprocess.run(["node", ...]) 的返回码来判断：二进制不存在时
+# subprocess 在 POSIX 与 Windows 都直接抛 FileNotFoundError，skip 永不触发，整文件
+# 塌成一片 error（本地装了 Node 看不出来；CI 上没有 Node，就是这么炸的）。
+# 问「在不在」用 shutil.which()，问「能不能跑」才用返回码。
+_NODE_MISSING_EXIT = """\
+import sys
+print("缺少 node：前端产物测试要真跑 vite + prerender.mjs。", file=sys.stderr)
+print("装好 Node（>=20）后在 web/ 跑 npm ci；不跑这组测试就忽略这条跳过原因。", file=sys.stderr)
+raise SystemExit(2)
+"""
+
+
+def _node_missing() -> bool:
+    """真的没装 Node 时为真——用 which() 而不是返回码，理由见文件头与上方注释。"""
+    return shutil.which("node") is None
+
+
+def _node_cmd(script: str) -> list[str]:
+    """起 Node 跑 prerender 脚本；缺 Node 时退化成 python 打一段中文原因后以 2 退出。
+
+    退化路径是安全网：fixture 已 skip 时用不到它，但同一文件里直接调脚本的用例
+    万一手滑没走 fixture，也只会得到「非零退出 + 人能看懂的原因」，而不是
+    FileNotFoundError 把收集阶段整段打崩。
+    """
+    node = shutil.which("node")
+    if node is None:
+        return [sys.executable, "-c", _NODE_MISSING_EXIT]
+    return [node, script]
 
 
 def _ev(path: str, start: int, end: int, symbol: str, note: str) -> dict[str, Any]:
@@ -200,7 +233,7 @@ def built() -> None:
     """
     if not (WEB / "package.json").exists():
         pytest.skip("源码树里没有 web/，跳过前端产物测试")
-    if subprocess.run(["node", "--version"], capture_output=True).returncode != 0:
+    if _node_missing():
         pytest.skip("没装 node，无法构建前端产物")
     if not (WEB / "node_modules").exists():
         pytest.skip("web/node_modules 缺失，先在 web/ 跑 npm install")
@@ -217,7 +250,7 @@ def _render(tmp_path: Path, data: dict[str, Any]) -> Path:
     data_file.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     env = {**os.environ, "MEMEX_SITE_DATA": str(data_file), "MEMEX_SITE_OUT": str(out)}
     proc = subprocess.run(
-        ["node", str(WEB / "build" / "prerender.mjs")],
+        _node_cmd(str(WEB / "build" / "prerender.mjs")),
         cwd=str(WEB), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300, check=False, env=env,
     )
     if proc.returncode != 0:
@@ -550,7 +583,7 @@ def test_prerender_fails_when_css_missing(built, tmp_path, monkeypatch):
     fake_web = tmp_path / "web"
     (fake_web / "build").mkdir(parents=True)
     proc = subprocess.run(
-        ["node", str(WEB / "build" / "prerender.mjs")],
+        _node_cmd(str(WEB / "build" / "prerender.mjs")),
         capture_output=True, text=True, encoding="utf-8", errors="replace", env={**env, "MEMEX_WEB_ROOT": str(fake_web)}, check=False,
     )
     if proc.returncode == 0:
@@ -563,7 +596,7 @@ def test_prerender_fails_when_css_missing(built, tmp_path, monkeypatch):
 
 def test_prerender_rejects_wrong_schema(tmp_path):
     """schema 对不上就停：宁可不产页面，也不要出一张静默错页。"""
-    if subprocess.run(["node", "--version"], capture_output=True).returncode != 0:
+    if _node_missing():
         pytest.skip("没装 node")
     if not (WEB / "node_modules").exists():
         pytest.skip("web/node_modules 缺失")
@@ -574,7 +607,7 @@ def test_prerender_rejects_wrong_schema(tmp_path):
     out = tmp_path / "dist"
     env = {**os.environ, "MEMEX_SITE_DATA": str(data_file), "MEMEX_SITE_OUT": str(out)}
     proc = subprocess.run(
-        ["node", str(WEB / "build" / "prerender.mjs")],
+        _node_cmd(str(WEB / "build" / "prerender.mjs")),
         cwd=str(WEB), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300, check=False, env=env,
     )
     assert proc.returncode != 0, "schema 不匹配必须失败"
@@ -587,7 +620,7 @@ def test_prerender_needs_data_and_out(built):
     env = {k: v for k, v in os.environ.items()
            if k not in ("MEMEX_SITE_DATA", "MEMEX_SITE_OUT")}
     proc = subprocess.run(
-        ["node", str(WEB / "build" / "prerender.mjs")],
+        _node_cmd(str(WEB / "build" / "prerender.mjs")),
         cwd=str(WEB), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, check=False, env=env,
     )
     assert proc.returncode != 0
