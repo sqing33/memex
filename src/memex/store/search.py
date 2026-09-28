@@ -293,7 +293,7 @@ def _load_cross_encoder(model_name: str) -> Any:
     按模型名进程内缓存、失败结果也缓存、墙钟上限复用 MEMEX_EMBEDDER_LOAD_TIMEOUT。
     """
     try:
-        from sentence_transformers import CrossEncoder
+        from sentence_transformers import CrossEncoder  # type: ignore[import-not-found]
     except Exception as exc:  # noqa: BLE001 - 归一为 MemexError
         raise MemexError(
             "internal",

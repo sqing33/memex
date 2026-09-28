@@ -27,13 +27,14 @@ memex = "memex.cli:main"
 packages = ["src/memex"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 strict = true
 
-# 可选依赖边界：sentence-transformers / tree-sitter 未安装时靠 `# type: ignore` 兜底，
-# 安装后该 ignore 会变成 unused；这两个模块关掉 unused-ignore 警告，其余模块保持严格。
+# 可选依赖边界：sentence-transformers / huggingface_hub / tree-sitter 未安装时，
+# 那几处 import 天然是 import-not-found，靠 `# type: ignore` 兜底；安装后该 ignore
+# 会变成 unused。这三个模块关掉 unused-ignore 警告，其余模块保持严格。
 [[tool.mypy.overrides]]
-module = ["memex.embeddings", "memex.evidence.symbols"]
+module = ["memex.embeddings", "memex.evidence.symbols", "memex.store.search"]
 warn_unused_ignores = false
 
 [tool.pytest.ini_options]

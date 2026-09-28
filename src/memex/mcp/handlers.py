@@ -97,7 +97,9 @@ class Runtime:
         连接才是真并发：每线程独享游标状态，线程间不共享任何可变状态。跨线程写
         仍由 SQLite 自己仲裁（WAL + busy_timeout 30s 忙等，见 store/db.py）。
         """
-        conn = getattr(self._tls, "conn", None)
+        # 显式标注：threading.local 属性是 Any，不加注解这里就退化成
+        # "Returning Any from function declared to return Connection"。
+        conn: sqlite3.Connection | None = getattr(self._tls, "conn", None)
         if conn is not None:
             return conn
         if not self.cfg.paths.db.exists():

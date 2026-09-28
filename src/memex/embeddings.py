@@ -257,7 +257,7 @@ def local_model_cached(spec: str) -> bool:
     if "/" not in name:
         name = "sentence-transformers/" + name
     try:
-        from huggingface_hub import try_to_load_from_cache
+        from huggingface_hub import try_to_load_from_cache  # type: ignore[import-not-found]
     except Exception:  # noqa: BLE001
         return False
     try:
