@@ -339,4 +339,5 @@ React 之间**唯一**的接口，也是 CI 里可断言的契约。**构建失�
 | 启动报 schema 版本不符 | 库比代码新 | 拒绝启动是正确的；升级 memex 或从备份恢复（G9） |
 | 证据包 `truncated: true` | 超 `depth` 上限 | 换更大的 `depth`，或接受截断（已显式标注，G5） |
 | `export-site` 报 `node: not found` 或 `npm run build` 失败 | 站点构建要 Node，但 Python 侧不依赖它 | 不影响 MCP 与分析。先 `cd web && npm ci`；只想拿数据不想出页就**不加** `--build`，直接读 `site-data.json`（`schema_id: memex/site/1`） |
+| CI（`validate-main`）里前端产物用例整组 skip | CI 镜像不装 Node（这是有意的，见 `deployment.md` §11） | 属预期，不是回归。本地装了 Node 时它们照常跑（185 例全绿）；守卫用 `shutil.which("node")`，别改回跑 `node --version` 看返回码 |
 | 站点页缺了刚分析完的仓 | 站点是**快照**，不是常驻服务 | 重跑 `memex export-site --build` 后刷新。commit 已自动重新 dump，所以数据是新的，只是没重新排版 |

@@ -422,3 +422,37 @@ DSH GUI 等价路径：MCP 服务器设置 → 添加 → 类型 `http` → 填 
 | **把 `repos/` 纳入备份** | 可从 git 重建，备份它只是浪费存储 |
 | **在请求路径上下载模型** | 会挂住 `initialize`；离线环境下退避重试能挂几分钟 |
 | **"先本地 stdio 跑通再上远程"的过渡版本** | 本文的 `serve-http` 形态与本地 `serve-mcp` **共用同一套 `Runtime`/`handlers`**，不是两套实现；本地形态保留是为了单仓调试方便，不是"上一阶段" |
+
+## 11. CI 与测试
+
+`.circleci/config.yml` 里只有一条工作流 **`main-image`**，只在 `main` 分支 push 时触发：
+
+```
+validate-main ──┬─→ build-main-amd64 ──┐
+                └─→ build-main-arm64 ──┴─→ build-main-manifest
+```
+
+| job | 干什么 |
+|---|---|
+| `validate-main` | `cimg/python:3.12` 容器里 `pip install -e '.[dev]'` → `python -m mypy src/memex` → `MEMEX_EMBEDDER=hash:64 python -m pytest tests/ -q` |
+| `build-main-{amd64,arm64}` | machine executor（`ubuntu-2204:current`）上 `docker buildx build --platform linux/{amd64,arm64}`，push 到 `ghcr.io/sqing33/memex` |
+| `build-main-manifest` | 校验两个 digest 的架构与 label 后 `docker buildx imagetools create` 合并成 `:latest` |
+
+需要在 CircleCI 项目里配的**项目级环境变量**：`GHCR_USERNAME` / `GHCR_TOKEN`（推 ghcr.io 用）；
+不需要在平台侧设分支触发器——触发条件写在 workflow 的 `filters` 里。
+
+两个**刻意的取舍**，别在后续改动里丢掉：
+
+- **validate-main 不联网**：测试用 `MEMEX_EMBEDDER=hash:64`（伪向量），`.[dev]` extra 里
+  **没有** `sentence-transformers` / `numpy`。`huggingface_hub` / `sentence-transformers` 的
+  import 靠 `# type: ignore[import-not-found]` 兜底，`pyproject.toml` 里对应三个模块关了
+  `unused-ignore`。零网络依赖 = CI 不会因为模型仓库抽风而红。
+- **validate-main 不装 Node**：前端产物测试（`tests/test_site_build.py`）是**站点展示层**回归，
+  不是 MCP / 分析核心。CI 镜像里没有 Node，这些用例会**显式 `skip`**——这是有意的边界，
+  与「Node 工具链不进 Python 包、分析路径永不依赖 Node、React build 属部署／手动」
+  （`decisions.md` / `tech-design.md`）一致。本地有 Node 时它们照常跑（185 例全绿）。
+  守卫用 `shutil.which("node")` 判定，**不要**改回跑 `node --version` 看返回码：
+  二进制不存在时 `subprocess` 抛的是 `FileNotFoundError`，不是非零返回码——CI 上就是这么塌的。
+
+镜像每次 main push 都重建；部署端只要 `docker compose pull && docker compose up -d`
+（见仓库根 `docker-compose.yml` 头注释）。
