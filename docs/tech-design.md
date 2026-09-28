@@ -71,7 +71,7 @@ D1 定下「真语义模型是默认」，具体落地：
 
 | 形态 | 实现 | 何时用 |
 |---|---|---|
-| **默认** | `sentence-transformers` 多语种模型（如 `paraphrase-multilingual-MiniLM-L12-v2`，约 470MB） | 装机即用，离线可跑，无需 key |
+| **默认** | `sentence-transformers` 多语种模型（如 `paraphrase-multilingual-MiniLM-L12-v2`，约 470MB）；**容器形态下不进镜像**，首启下载进卷内 HF 缓存 | 装机即用，离线可跑，无需 key |
 | **可选** | HTTP embedding 服务（OpenAI 兼容 / 本地 vLLM / Ollama） | 想要更好的多语效果，或不想下模型 |
 | **冒烟** | hash embedder | 只在「目标机器装不上任何依赖」时跑测试；**不是推荐形态** |
 
@@ -555,7 +555,7 @@ agent 的工具链崩掉一个 MCP 连接是很烦的事，而只要核心层零
 ### 3.3 配置
 
 ```
-$MEMEX_HOME              默认 ~/.memex（远程：/var/lib/memex）
+$MEMEX_HOME              默认 ~/.memex（远程：/data/memex）
 $MEMEX_EMBEDDER          默认 sentence-transformers 模型名；可设 hash:512 / http:<url>
 $MEMEX_RERANK            默认 off；可设 cross-encoder 模型名（on = 用默认模型）。
                       默认 off 是实测结论不是省事：
@@ -720,7 +720,7 @@ claude mcp add --transport http memex https://memex.example.com/mcp \
 
 | 项 | 本地 stdio | 远程常驻 |
 |---|---|---|
-| `MEMEX_HOME` | `~/.memex` | `/var/lib/memex`（由 systemd 指定，勿放代码目录） |
+| `MEMEX_HOME` | `~/.memex` | `/data/memex`（由服务管理器指定，勿放代码目录） |
 | 备份 | 用户自己拷 | **运维责任**：`sqlite3 .backup` 定时 + 离线留存（见 §2.2 可重建性分层，只备份真源层） |
 | SQLite 模式 | WAL（默认） | WAL；**注意 WAL 依赖同机文件系统**，网络盘（NFS）不安全 |
 | 并发写 | 单进程 | 多客户端 → 保持「单写者」：SQLite 单写事务 + `busy_timeout`；写入集中在 `commit_report`，压力很低 |
@@ -737,25 +737,28 @@ claude mcp add --transport http memex https://memex.example.com/mcp \
 ```
 ① systemd（推荐）
    [Unit] After=network.target
-   [Service] User=memex  WorkingDirectory=/var/lib/memex
-             Environment=MEMEX_HOME=/var/lib/memex
+   [Service] User=memex  WorkingDirectory=/data/memex
+             Environment=MEMEX_HOME=/data/memex
              Environment=MEMEX_EMBEDDER=...
              ExecStart=/usr/local/bin/memex serve-http --host 127.0.0.1 --port 8931
              Restart=always  RestartSec=3
    → 由反向代理（Caddy/Nginx）终结 TLS 并转发；服务不直接听公网
 
 ② 容器
-   Dockerfile + `--model-cache` 卷；镜像里预下嵌入模型（否则首次启动会联网下载几百 MB）
+   Dockerfile + 卷；**镜像里不放模型**，容器首启由 memex 自动下载到卷内 HF 缓存
+   （`deployment.md` §5.2）；下载只需成功一次，之后一直命中缓存
 
 ③ 启动预热（后台线程，**不阻塞 `initialize`**）
    进程起来后在**后台线程**把嵌入模型 load 进内存（否则第一次 search 要等十几秒）。
    不能同步加载：stdio 客户端 `initialize` 超时通常 60s，而离线环境下 huggingface_hub
    联网回源会带退避重试挂几分钟。预热失败 → 首次需要嵌入的工具调用**显式报错**
-   （不静默降级）并缓存失败，联网加载有墙钟上限（默认 20s）
+   （不静默降级）并缓存失败，加载有墙钟上限（默认 **300s**，见 `deployment.md` §5.2）
 ```
 
-**嵌入模型放哪**：sentence-transformers 模型约 470MB，应**烘进镜像/预置到服务器**，
-不要在请求路径上下载。若服务器 CPU 弱、要更强的多语效果，就切 `MEMEX_EMBEDDER=http:<url>`
+**嵌入模型放哪**：sentence-transformers 模型约 470MB，**既不烘进镜像、也不在请求路径上下载**——
+改由容器首启时自动下载到**卷内 HF 缓存**（`HF_HOME=/data/models`），此后离线命中；
+在线部署只需成功下载一次，纯离线机可预先把缓存放进卷（`deployment.md` §5.2）。
+若服务器 CPU 弱、要更强的多语效果，就切 `MEMEX_EMBEDDER=http:<url>`
 打到一台专门的 embedding 服务（§1.4），把重活分离出去。
 
 #### 仓库元数据的来源边界

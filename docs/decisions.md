@@ -1076,7 +1076,7 @@ src/memex/import_/vibecraft.py` 零命中），而 `operations.md` 已经写着
 
 **③ 嵌入模型不可用**
 - 启动检查（`operations.md` §4）第 3 步：模型加载失败 → **`serve-mcp` / `serve-http` 拒启**，
-  stderr 明确报「嵌入模型不可用」+ 三条出路（预置模型 / `MEMEX_EMBEDDER=http:<url>` /
+  stderr 明确报「嵌入模型不可用」+ 三条出路（确保能出网 / 预置模型 / `MEMEX_EMBEDDER=http:<url>` /
   显式 `MEMEX_EMBEDDER=hash:512`）。
 - **只有显式写 `hash:512` 才降级**，且 `recall_stats` 与启动横幅必须带
   `degraded: true, embedder: "hash"`。**默认路径绝不静默退 hash**（D1 已定：hash 无语义 =

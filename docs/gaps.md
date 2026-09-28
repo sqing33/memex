@@ -620,8 +620,8 @@ batch 排到 **V5**（它与 V5 的「规模」目标天然同批，V1~V4 用 ag
 
 **问题**：远程服务器在**公司内网 / 无外网 / GitHub 被限**的环境下，
 `fetch_repo` 的 clone 与 tarball 两条路都断了。另外**嵌入模型约 470MB**
-（`tech-design.md:73`）——`tech-design.md:496/502` 已建议「烘进镜像 / 预置到服务器」，
-**但没说预置失败时怎么办**。
+（`tech-design.md:73`）——现行落地是**不烘镜像、由容器首启下载到卷内 HF 缓存**
+（`deployment.md` §5.2），**但没说下载失败时怎么办**。
 
 **建议**：`fetch_repo` 支持 ① 可配的 GitHub 镜像（`MEMEX_GIT_MIRROR`）②
 **手动投喂**（agent 在开发机 clone 好，用 `request_repo_bundle` 的**反向**：

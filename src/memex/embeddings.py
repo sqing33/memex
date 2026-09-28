@@ -95,9 +95,12 @@ def _sanitize_no_proxy_env() -> None:
 
 
 def _load_timeout_seconds() -> float:
-    """联网加载真模型的墙钟上限（秒）；可用 MEMEX_EMBEDDER_LOAD_TIMEOUT 覆盖。
+    """加载真模型的墙钟上限（秒）；可用 MEMEX_EMBEDDER_LOAD_TIMEOUT 覆盖。
 
-    默认 20s：给客户端 60s 工具调用超时留足余量，确保失败以显式错误返回。
+    默认 300s：**镜像不烘焙模型**（deployment.md §5.2），容器首启要联网下载
+    约 470MB 到卷内 HF 缓存，比本机命中缓存慢得多——沿用早先的 20s 会把
+    「第一次下载」误判成加载失败。上限只决定「一次加载最多等多久」，
+    不改变失败语义：超时仍**显式报错**，绝不静默降级（D1/G22）。
     """
     raw = os.environ.get("MEMEX_EMBEDDER_LOAD_TIMEOUT")
     if raw:
@@ -107,7 +110,7 @@ def _load_timeout_seconds() -> float:
                 return v
         except ValueError:
             pass
-    return 20.0
+    return 300.0
 
 
 def _run_with_deadline(fn: Callable[[], Any], seconds: float, label: str) -> Any:
@@ -134,7 +137,7 @@ def _run_with_deadline(fn: Callable[[], Any], seconds: float, label: str) -> Any
             {
                 "reason": "load timeout",
                 "outs": [
-                    "预置模型文件到 HF 缓存（离线可用）",
+                    "确保首启能出网（模型会自动下到卷内 HF 缓存），或预置模型文件",
                     "MEMEX_EMBEDDER=http:<url> 指向远端嵌入接口",
                     "仅调试可显式 MEMEX_EMBEDDER=hash:512（无语义，degraded:true）",
                 ],

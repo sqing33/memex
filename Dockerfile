@@ -2,24 +2,24 @@
 # ============================================================
 # memex — 单容器远程 MCP 服务（serve-http）多阶段构建
 # 规格来源：docs/deployment.md §5（容器形态）
-# 与 Benchmark 项目 Dockerfile 同构：多阶段 / 分节中文注释 / 非 root / exec 直启
 #
-# 镜像只承载「机械活 + 知识库」：标准库 HTTP 服务 + git clone/bundle + 嵌入。
-# 不装 analysis extra（tree-sitter 尚未接线），不引入任何 ASGI 依赖
-# （server 恒用标准库 ThreadingHTTPServer，见 pyproject 注释里的 D6）。
+# 镜像只承载「机械活 + 代码」：标准库 HTTP 服务 + git clone/bundle + 嵌入依赖（CPU-only）。
+# **不烘焙嵌入模型**——模型由容器首启时的准备步骤下载到挂载卷内（见 §5.2）。
+# 因此镜像小、构建快、换模型不用重建镜像；代价是首次启动要联网下载约 470MB。
 #
-# 缓存策略（需 BuildKit）：
-# - deps 阶段用 pip cache mount 复用已下载 wheel
-# - model 阶段用 HF cache mount 复用 470MB 模型下载；该阶段只依赖第三方依赖、
-#   不依赖 src/，因此改代码不会触发模型重下
+# 不装 analysis extra（tree-sitter 尚未接线）；不引入任何 ASGI 依赖
+# （server 恒用标准库 ThreadingHTTPServer）。
+#
+# 缓存策略（需 BuildKit）：deps 阶段用 pip cache mount 复用已下载 wheel。
 # ============================================================
 
 # ---- base ----
 FROM python:3.12-slim AS base
 # git 是硬依赖：T1 clone / T4 bundle / T17 verify 都调 git 二进制
-# tzdata 让镜像认得 TZ（报告时间戳按北京时间渲染，与 Benchmark 一致）
+# tzdata 让镜像认得 TZ（报告时间戳按北京时间渲染）
+# ca-certificates：首启联网下载嵌入模型走 HTTPS 的前提
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git tzdata \
+ && apt-get install -y --no-install-recommends git tzdata ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -32,6 +32,11 @@ FROM base AS deps
 COPY pyproject.toml ./
 RUN --mount=type=cache,id=pip,target=/root/.cache/pip \
     python -m pip install --upgrade pip
+# 先装 **CPU-only torch**：PyPI 的 torch 会拖整套 CUDA（nvidia-* wheels），
+# 单这一层就 3GB+；本服务不需 GPU，走 PyTorch CPU index 装可让镜像从 ~4GB 缩到 ~1GB。
+# 放在 default extra 之前：pip 解析 sentence-transformers 时看到 torch 已满足，不会重装。
+RUN --mount=type=cache,id=pip,target=/root/.cache/pip \
+    python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
 RUN --mount=type=cache,id=pip,target=/root/.cache/pip \
     python - <<'PY'
 import subprocess, sys, tomllib
@@ -43,28 +48,9 @@ deps = cfg["project"]["optional-dependencies"]["default"]
 subprocess.check_call([sys.executable, "-m", "pip", "install", *deps])
 PY
 
-# ---- model: 烘焙嵌入模型（不在请求路径上下载，见 deployment.md §5.2）----
-FROM deps AS model
-# 这一步是「联网下载」：此刻绝不能置 OFFLINE 标志，否则 transformers/hf_hub
-# 会直接拒绝出网（报 LocalEntryNotFoundError: outgoing traffic has been disabled）。
-# OFFLINE 只对运行时有意义，放在下载完之后再设。
-# 先下到 BuildKit cache mount（跨构建复用 470MB），再拷进镜像层。
-RUN --mount=type=cache,id=hf-model,target=/tmp/hf-cache \
-    HF_HOME=/tmp/hf-cache python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')" \
- && mkdir -p /opt/memex-models \
- && cp -a /tmp/hf-cache/. /opt/memex-models/
-
-# 运行时 HF_HOME 指向 /opt/memex-models，配合 OFFLINE=1 完全离线加载
-ENV HF_HOME=/opt/memex-models \
-    TRANSFORMERS_OFFLINE=1 \
-    HF_HUB_OFFLINE=1
-# 自校验：置 OFFLINE 后仍须能从镜像内缓存加载成功。
-# 若这一步炸，说明上面的 cp 路径/HF_HOME 对不上——在构建期就暴露，而不是线上首启。
-RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2'); print('offline model load OK')"
-
-# ---- runner: 运行时镜像（第三方依赖 + 模型 + 本项目源码）----
-FROM model AS runner
-# 装 memex 命令本身；第三方依赖/模型层已在下面，这里只补本项目（--no-deps）
+# ---- runner: 运行时镜像（第三方依赖 + 本项目源码）----
+FROM deps AS runner
+# 装 memex 命令本身；第三方依赖已在上一层，这里只补本项目（--no-deps）
 COPY pyproject.toml README.md ./
 COPY src/ ./src/
 RUN --mount=type=cache,id=pip,target=/root/.cache/pip \
@@ -72,13 +58,23 @@ RUN --mount=type=cache,id=pip,target=/root/.cache/pip \
 
 # 非 root：服务要 clone 任意仓、能读整个 home，有 root 等于全盘可读
 RUN useradd --create-home --uid 1000 --shell /usr/sbin/nologin memex \
- && mkdir -p /var/lib/memex \
- && chown -R memex:memex /var/lib/memex /opt/memex-models
+ && mkdir -p /data/memex /data/models \
+ && chown -R memex:memex /data/memex /data/models
 
 USER memex
-# 远程形态的 MEMEX_HOME（E17）；compose 具名卷挂到这里
-ENV MEMEX_HOME=/var/lib/memex
-VOLUME /var/lib/memex
+# 容器内数据根（E17 的 MEMEX_HOME）。用 /data/memex：
+# 容器里的挂载点本无标准，是镜像作者定的；/data 是 docker 镜像里最常见的一派
+# （本机 NAS 上其他应用也多用 /data、/config 这类短路径），比自己发明一个 /srv/... 好认。
+# 这只是容器内路径，真正落盘位置由 compose 的卷决定。
+ENV MEMEX_HOME=/data/memex
+# 嵌入模型缓存**单独一个挂载点**（/data/models），与数据目录分开，便于各自挂卷：
+# 模型是纯缓存、可再生，数据是要备份的真源。首启由 memex 联网下载到 HF_HOME（§5.2），
+# 之后每次启动命中同一份缓存、不再联网。
+# MEMEX_EMBEDDER_LOAD_TIMEOUT 放大到 300s：首启在容器内下载 470MB 比本机慢得多，
+# 沿用默认 20s 会把「第一次下载」误判为加载失败。
+ENV HF_HOME=/data/models \
+    MEMEX_EMBEDDER_LOAD_TIMEOUT=300
+VOLUME /data/memex /data/models
 EXPOSE 8931
 
 # exec 形式（无 shell）→ PID 1 就是 memex，docker stop 信号直达进程。

@@ -290,7 +290,7 @@ def _load_cross_encoder(model_name: str) -> Any:
     """加载 cross-encoder（sentence-transformers 的 CrossEncoder）。
 
     真模型加载昂贵，联网回源可能挂几分钟（与嵌入器同一类风险），因此：
-    按模型名进程内缓存、失败结果也缓存、墙钟上限复用 MEMEX_EMBEDDER_LOAD_TIMEOUT。
+    按模型名进程内缓存、失败结果也缓存、墙钟上限用独立的 MEMEX_RERANK_LOAD_TIMEOUT。
     """
     try:
         from sentence_transformers import CrossEncoder  # type: ignore[import-not-found]
@@ -314,7 +314,7 @@ def _load_cross_encoder(model_name: str) -> Any:
     # 离线优先，与嵌入器同一套路（embeddings.py:191）：命中本地 HF 缓存即不联网；
     # 只有本地没有才联网拉一次，且有墙钟上限。
     # 注意 bge-reranker-base 是 1.1GB 级的模型，比嵌入器重得多，
-    # 墙钟上限用独立的 MEMEX_RERANK_LOAD_TIMEOUT（默认 120s）而不是复用 20s。
+    # 墙钟上限用独立的 MEMEX_RERANK_LOAD_TIMEOUT（默认 120s），不复用嵌入器的上限。
     label = "cross-encoder " + model_name
     try:
         return CrossEncoder(model_name, max_length=RERANK_MAX_LENGTH, local_files_only=True)
@@ -327,7 +327,7 @@ def _rerank_load_timeout_seconds() -> float:
     """cross-encoder 联网加载的墙钟上限（秒）。
 
     独立于 MEMEX_EMBEDDER_LOAD_TIMEOUT：bge-reranker-base 约 1.1GB，
-    用嵌入器的 20s 默认值会**必然超时**（实测首次联网加载就撞了 20s 上限）。
+    用嵌入器早先的 20s 默认会**必然超时**（实测首次联网加载就撞了 20s 上限）。
     """
     raw = os.environ.get("MEMEX_RERANK_LOAD_TIMEOUT")
     if raw:

@@ -47,8 +47,8 @@ memex 以**单容器**跑在服务器上（`memex serve-http`），本地 coding
 | 容器 | 服务器 | `memex serve-http --host 0.0.0.0 --port 8931`；**容器内必须绑 `0.0.0.0`** |
 | 端口发布 | 宿主机 | `8931:8931`——**正常映射**，容器服务直接对外 |
 | 反代 | 宿主机 | **用你已有的反代链路**，memex 侧只管在 8931 提供明文 HTTP（§4.4） |
-| 卷 | 宿主机 | `/var/lib/memex`（E17 要求的远程 `MEMEX_HOME`，`operations.md:16`） |
-| 嵌入模型 | 镜像内 | 烘焙进镜像，**不在请求路径上下载**（§5.2） |
+| 卷 | 宿主机 | 两个目录：**数据**+**模型缓存**；容器内 `/data/memex`（=E17 的远程 `MEMEX_HOME`）与 `/data/models` |
+| 嵌入模型 | 卷内 | **不烘焙**：首启按需下载进卷内 HF 缓存，之后不再联网（§5.2） |
 | agent | 本地 | 永远不在服务器上 |
 
 ## 3. 端到端链路（一次分析的完整时序）
@@ -122,8 +122,9 @@ Streamable HTTP，**只回 `application/json`**，不实现 SSE（E15）。
 ```
 
 `ok=false` 当且仅当 `db_ok=false`。`embedder_ready=false` **不**让 `ok` 变 false
-——预热未完成是正常状态（§5.2），此时 `/healthz` 返回 200 但 `embedder_ready=false`，
-真正的嵌入失败由**首个需要向量的工具调用显式报错**，不静默降级（D1/G22）。
+——预热未完成是正常状态（§5.2）：**首启正在下载模型**时就是这一态，此时 `/healthz`
+返回 200 但 `embedder_ready=false`，真正的嵌入失败由**首个需要向量的工具调用显式报错**，
+不静默降级（D1/G22）。
 
 ### 4.4 反代：接入已有的反代链路
 
@@ -149,8 +150,7 @@ memex 侧对反代的**唯一要求**（三条）：
 | 层 | 内容 | 理由 |
 |---|---|---|
 | base | `python:3.12-slim` + `git` | `git` binary 是硬依赖：T1 clone / T4 bundle / T17 verify 都要 |
-| deps | `pip install .[default]` | 嵌入模型必需；`analysis` extra **不进生产镜像**（`http` extra 已删，见下） |
-| model | `RUN` 预下载嵌入模型到 `/opt/memex-models` | 470MB 烘进镜像，见 §5.2 |
+| deps | `pip install .[default]`（**先装 CPU-only torch**，见下） | 嵌入模型必需；`analysis` extra **不进生产镜像**；CPU wheel 免拖整套 CUDA |
 | src | `pip install --no-deps .` | 装 `memex` 命令（`pyproject.toml:23-24`） |
 | user | 非 root `memex`（uid 1000） | 服务要 clone 任意仓、能读整个 home，有 root 就等于全盘可读 |
 | entry | `exec memex serve-http --host 0.0.0.0 --port 8931` | `exec` 让 PID 1 是 memex，信号直达 |
@@ -163,44 +163,41 @@ memex 侧对反代的**唯一要求**（三条）：
 > **`exec` + `0.0.0.0`**：现状 `cli.py:34` 的 `--host` 默认 `127.0.0.1`，
 > **在容器里绑回环等于外部访问不到**。这是 Docker 化的必改点。
 
-### 5.2 嵌入模型烘焙
+### 5.2 嵌入模型：首启自动下载，不进镜像
 
-**顺序有讲究：先联网下载，再置离线标志。** 下载那一刻不能有
-`TRANSFORMERS_OFFLINE` / `HF_HUB_OFFLINE`——否则 `transformers`/`huggingface_hub`
-直接拒绝出网，构建期就报
-`LocalEntryNotFoundError: ... outgoing traffic has been disabled`（曾踩过，
-见 `.circleci/config.yml` 对应的 build-main 日志）。`OFFLINE` 只对**运行时**
-有意义，故放在下载**之后**：
+**镜像里没有模型。** 模型（`paraphrase-multilingual-MiniLM-L12-v2`，约 470MB）由
+容器**首次启动时**由 `memex` 自己下载到卷内 HF 缓存
+（`HF_HOME=/data/models`），之后一直命中缓存、不再联网。
 
-```dockerfile
-# 1) 联网下载到 HF_HOME（先下到 BuildKit cache mount，再 cp 进镜像层）
-RUN --mount=type=cache,id=hf-model,target=/tmp/hf-cache \
-    HF_HOME=/tmp/hf-cache python -c "from sentence_transformers import SentenceTransformer; \
-             SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')" \
- && mkdir -p /opt/memex-models \
- && cp -a /tmp/hf-cache/. /opt/memex-models/
+为什么不烘焙：
+- **镜像瘦身**：烘焙会让镜像多出 ~470MB 模型层，且它和代码更新节奏无关，纯拖累 `docker pull`；
+- **换模型=改 env**：卷内缓存让「换嵌入器」只需改 `MEMEX_EMBEDDER` 重起，不必重打镜像；
+- **失败仍然显式**：首启下载失败**不静默降级**——`/healthz` 保持 `embedder_ready=false`，
+  首个需要向量的工具调用显式报错（D1/G22），绝不悄悄换用错模型。
 
-# 2) 下载完成后再声明离线（运行时不联网）
-ENV HF_HOME=/opt/memex-models \
-    TRANSFORMERS_OFFLINE=1 \
-    HF_HUB_OFFLINE=1
+镜像已内建，部署时**无需任何额外配置**：
+- `Dockerfile` 设 `ENV HF_HOME=/data/models`（**独立的模型卷挂载点**），缓存落进模型卷，重建容器不丢；
+- `MEMEX_EMBEDDER_LOAD_TIMEOUT` 默认 **300s**（`embeddings.py:_load_timeout_seconds`），
+  给首次下载留足时间——早先的 20s 会把「第一次下载」误判成加载失败；
+- `src/memex/embeddings.py` 本就是**离线优先、缺则联网**：先
+  `SentenceTransformer(model, local_files_only=True)`，失败才联网下载；
+- 下载走 HTTPS，故 base 阶段装了 `ca-certificates`。
 
-# 3) 构建期自校验：离线状态下仍能从镜像内缓存加载
-RUN python -c "from sentence_transformers import SentenceTransformer; \
-             SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2'); \
-             print('offline model load OK')"
-```
+> **首启观察窗口**：容器起来后 `/healthz` 先返回 `status=warming` /
+> `embedder_ready=false`，下载完成即转 `ok`。这是正常态，不是故障。
 
-不烘焙的后果：容器首启要联网下 470MB，`initialize` 前挂住；
-离线环境下 `huggingface_hub` 回源带退避重试会**挂几分钟**（`tech-design.md` §4.6）。
+> **纯离线部署**：目标机不能出网时，预先往模型卷目录放好 HF 缓存
+> 即可首启命中；否则 `huggingface_hub` 回源带退避重试会**挂几分钟**（`tech-design.md` §4.6）。
 
 **CPU 弱的服务器**可以改 `MEMEX_EMBEDDER=http:<url>` 打到专门的 embedding 服务，
 把重活分离出去（`operations.md` §1.4）。
 
 ### 5.3 卷与目录
 
+**模型缓存单独一个卷**，与数据卷分开——这样重建库 / 整体替换数据时不必重下那 470MB 模型。
+
 ```
-/var/lib/memex/           ← named volume（E17 远程 MEMEX_HOME）
+【数据卷】/data/memex/              ← MEMEX_HOME（E17，要备份）
   memex.db                真源：repos/analyses/features/cards/evidence/
                                patterns/pattern_members/pattern_intents/
                                sessions/session_stats/meta      【千金难买，备份它】
@@ -208,7 +205,18 @@ RUN python -c "from sentence_transformers import SentenceTransformer; \
   repos/<owner>__<name>/  克隆（可从 git 重建，不备份）
   bundles/                待下发 bundle（LRU 20 个）
   credentials.json        0600，私有仓凭据
+
+【模型卷】/data/models/           ← HF_HOME（§5.2，纯缓存）
+  hub/…                   HuggingFace 缓存（嵌入模型，约 470MB，可重新下载）
 ```
+
+**为什么拆**：数据卷**有状态、要备份**；模型卷**纯缓存、可再生**。分开的好处：
+- 重建库 / 搬数据卷时模型卷不动，首启不必再下 470MB；
+- 模型卷可放读多写少的盘，数据卷留在系统盘；
+- 备份策略各自独立——模型卷**不该进备份**，省掉 470MB 死重量。
+
+**拆不拆都行**：不拆则模型落数据卷内，功能完全一样；
+拆只是把「可再生的重物」从备份对象里摘出去。
 
 **E17 已真拆**：`core.py` 的 `Paths.index_db` 指向 `index.db`；`store.db.connect()`
 连 `memex.db`（main）后 `ATTACH DATABASE index.db AS idx`——真源 11 表落 main、
@@ -220,7 +228,8 @@ RUN python -c "from sentence_transformers import SentenceTransformer; \
 
 **WAL 必须在本地文件系统**——WAL 依赖共享内存，网络盘（NFS）不安全
 （`tech-design.md` §4.5）。Docker 的 named volume 是本地盘，没问题；
-**不要**把 `/var/lib/memex` 挂到 NFS。
+**不要**把数据卷（`/data/memex`）挂到 NFS。模型卷是纯文件缓存、无 WAL，
+放网络盘技术上可行但没必要（每次读模型要过网）。
 
 ### 5.4 compose
 
@@ -231,9 +240,11 @@ services:
     image: memex:local
     restart: unless-stopped
     ports: ["8931:8931"]                  # 正常映射；反代链路在前面接
-    volumes: ["memex-data:/var/lib/memex"]
+    volumes:
+      - memex-data:/data/memex          # 数据卷（要备份）
+      - memex-models:/data/models      # 模型卷（纯缓存，不用备份）
     environment:
-      MEMEX_HOME: /var/lib/memex
+      MEMEX_HOME: /data/memex
       MEMEX_TOKEN: ${MEMEX_TOKEN:?必须设置}
       MEMEX_PUBLIC_BASE_URL: https://memex.example.com
       MEMEX_ALLOWED_ORIGINS: https://memex.example.com
@@ -251,10 +262,29 @@ services:
         limits: { cpus: "2.0", memory: 4G }
 volumes:
   memex-data:
+  memex-models:
 ```
 
+
+**卷的两种挂法**（§5.3）。**生产**用上面两个具名卷；**本地开发**常改成绑定挂载，
+数据落仓库 `./data`（已 `.gitignore`），删容器不丢库、也能直接用 `sqlite3` 打开
+`./data/memex.db`；模型缓存同理单独挂 `./models`（可整体替换数据而不重下模型）：
+
+```yaml
+    volumes:
+      - ./data:/data/memex
+      - ./models:/data/models   # 可再次删除重建，不影响数据
+```
+
+两者都须落**本地文件系统**（数据卷的 WAL 依赖共享内存，NFS 不安全，见 §5.3）。
 用 `python -c` 而不是 `curl` 探活，省掉镜像里一个包。
+
 `healthcheck` **不要带 Bearer**——这就是 §4.3 不要鉴权的原因。
+
+**宿主机目录惯例**：把整个服务目录放一处，数据与模型各一个**子目录**——
+例如 NAS 上 `/vol1/1000/Docker/memex/`，下面 `data/` + `models/` 分别 bind 到
+`/data/memex` 与 `/data/models`。这样备份、迁移、删缓存都只动一个子目录，
+不必记两条互不相干的宿主机路径。
 
 ## 6. 认证与安全（终态必做项）
 
@@ -419,7 +449,7 @@ DSH GUI 等价路径：MCP 服务器设置 → 添加 → 类型 `http` → 填 
 
 | 事项 | 做法 |
 |---|---|
-| **备份** | 只备份 `memex.db`（真源）。`sqlite3 /var/lib/memex/memex.db ".backup /backup/memex-$(date +%F).db"`，每日全量 + 离线留存。`index.db` 不备份（`memex reindex` 可重建），`repos/` 不备份（可重新 clone） |
+| **备份** | 只备份 `memex.db`（真源）。`sqlite3 /data/memex/memex.db ".backup /backup/memex-$(date +%F).db"`，每日全量 + 离线留存。`index.db` 不备份（`memex reindex` 可重建），`repos/` 不备份（可重新 clone） |
 | **换嵌入模型** | `docker compose exec memex memex reindex --embedder <新模型>`（需先改环境变量再重启）；**换完必须重跑**，否则 C1 会报 `conflict` |
 | **token 轮换** | 改 `MEMEX_TOKEN` 环境变量 + `docker compose up -d`。**在途 bundle 票据同时全部失效**（HMAC 密钥即 token）——这是有意的 |
 | **升级** | `docker compose build && docker compose up -d`。库比代码旧先 `docker compose run --rm memex memex migrate --dry-run`；库比代码新**拒绝启动是正确的**（G9） |

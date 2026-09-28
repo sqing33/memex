@@ -13,7 +13,7 @@
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `MEMEX_HOME` | `~/.memex`（远程：`/var/lib/memex`） | 数据库、克隆缓存、站点产物的根目录 |
+| `MEMEX_HOME` | `~/.memex`（远程：`/data/memex`） | 数据库、克隆缓存、站点产物的根目录 |
 | `MEMEX_TOOLS` | `read,write,network` | 工具类别放行集（G28）；`destructive` 从不默认开 |
 | `MEMEX_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 
@@ -71,7 +71,7 @@ git clone https://$TOKEN@github.com/me/private.git
 | `MEMEX_EMBEDDER` | `sentence-transformers` 多语种模型名 | 可设 `hash:512`（仅冒烟）/ `http:<url>` |
 | `MEMEX_RERANK` | `off` | 可设 cross-encoder 模型名，或 on 用默认模型。**默认 off 是实测结论不是省事**：ms-marco-MiniLM-L-6-v2 让 top-1 掉 6 个，BAAI/bge-reranker-base 抬 3 个（G25）|
 | `MEMEX_RERANK_LOAD_TIMEOUT` | `120` | cross-encoder 联网加载的墙钟上限（秒）。
-  独立于嵌入器的 20s：`BAAI/bge-reranker-base` 约 1.1GB，用 20s 必然超时（G25）|
+  独立于嵌入器的上限：`BAAI/bge-reranker-base` 约 1.1GB，用 20s 必然超时（G25）|
 
 > **混模型库会被拒绝**：写入与检索两端都断言 `chunk_vectors.embedder == meta.embedder`，
 > 不一致直接报 `conflict` 并提示跑 `memex reindex --embedder X`（G11）。
@@ -176,16 +176,19 @@ pysqlite 的**语句缓存**——并发线程复用同一个 `sqlite3_stmt`，�
 4. 嵌入模型：启动检查**不同步加载**真模型——同步加载会阻塞 MCP `initialize` 响应，
    且离线环境下的联网回源可能挂几分钟（客户端 60s 超时即断连）。检查阶段只做**快速校验**：
    - `spec` 为 ST 裸名 / `sentence-transformers:<名>` 且**本地 HF 缓存缺失** → 打警告
-     （提示预置模型文件），**不阻止启动**；
+     （提示首启会自动联网下载，见 `deployment.md` §5.2），**不阻止启动**；
    - 真模型改为**后台线程预热**（进程起来后 load 进内存），`initialize` 立即返回。
    预热或首次用到嵌入器时加载失败 → **不静默降级**，在**首次需要嵌入的工具调用**上
-   显式返回错误（`internal`），并给三条出路：预置模型文件 / `MEMEX_EMBEDDER=http:<url>` /
-   **显式** `MEMEX_EMBEDDER=hash:512`。联网加载设**墙钟上限**（默认 20s，
+   显式返回错误（`internal`），并给三条出路：确保能出网（首启自动下载）/ 预置模型文件 / `MEMEX_EMBEDDER=http:<url>` /
+   **显式** `MEMEX_EMBEDDER=hash:512`。加载设**墙钟上限**（默认 **300s**，
    `MEMEX_EMBEDDER_LOAD_TIMEOUT` 可调），超时即报错而非无限挂起；**失败结果被缓存**，
+   后续调用立即报同一错误（不重复等待）。**镜像不含模型**（`deployment.md` §5.2），
+   首启要从网上下约 470MB 到卷内 HF 缓存，比本机命中缓存慢得多——这正是上限从 20s
+   提到 300s 的原因。
    后续调用立即报同一错误（不重复等待）。
    cross-encoder（rerank）走**同一套缓存与失败缓存**逻辑，但墙钟上限独立：
    `MEMEX_RERANK_LOAD_TIMEOUT`，默认 **120s**——`bge-reranker-base` 约 1.1GB，
-   沿用嵌入器的 20s 会**必然超时**（实测首次联网加载就撞了 20s）。重排失败同样**显式报错**，
+   沿用嵌入器早先的 20s 会**必然超时**（实测首次联网加载就撞了 20s）。重排失败同样**显式报错**，
    不静默退回 RRF 假装重排成功。
    **只有显式写 `hash:512` 才降级**，且启动横幅与 `recall_stats` 必须带
    `degraded:true, embedder:"hash"`——**默认路径绝不静默退 hash**（D1：hash 无语义 = 跨语言卖点消失）。
@@ -328,7 +331,7 @@ React 之间**唯一**的接口，也是 CI 里可断言的契约。**构建失�
 | `fetch_failed`：403 | 私有仓且无凭据 | 配 `MEMEX_GIT_TOKEN__<host>`（G4） |
 | `fetch_failed`：404 且 `retryable:false` | 仓不存在/无权限 | 核对 URL；若确为私有仓，看是否有 token（G4） |
 | `fetch_failed`：clone/tarball 全断，但网络正常 | 内网/镜像环境（G22） | 设 `MEMEX_GIT_MIRROR`；或开发机 `git bundle` 后用 `upload_repo_bundle`（T17）投喂 |
-| 启动报「嵌入模型不可用」 | 预置模型缺失/下载失败（G22） | 预置模型，或 `MEMEX_EMBEDDER=http:<url>`；**别**用 `hash` 当长期形态 |
+| 启动报「嵌入模型不可用」 | 首启下载失败：出不了网 / 卷不可写 / HF 站被墙（G22） | 打通出网后重起（模型会缓存进卷，只需成功一次）；离线机可把 HF 缓存预放进卷；或 `MEMEX_EMBEDDER=http:<url>`；**别**用 `hash` 当长期形态 |
 | 回填报 `cards_imported: 0` | VibeCraft 证据链与本地文件对不上（G12） | 确认目标仓文件在本地（先 `fetch_repo` 或指到旧克隆）；`--dry-run` 看 `drop_reasons` |
 | 检索报 `conflict`（混模型） | `chunk_vectors` 有异构 embedder | `memex reindex --embedder <当前>`（G11） |
 | `rate_limited` | 触到 QPS / clone / embed 闸 | 按 `details.retry_after_seconds` 等待（G7） |

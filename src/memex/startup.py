@@ -117,7 +117,8 @@ def run_startup_check(cfg: Config, *, load_embedder: bool = True) -> dict[str, A
 
         if not local_model_cached(spec):
             warnings.append(
-                "嵌入模型未在本地缓存（" + spec + "）；首次检索会联网下载，建议预置模型文件到 HF 缓存"
+                "嵌入模型未在本地缓存（" + spec + "）；启动后会自动联网下载（约 470MB，"
+                "落到卷内 HF_HOME），下载期间 /healthz 的 embedder_ready=false"
             )
 
     # 5. MEMEX_TOOLS 解析 ---------------------------------------------- #

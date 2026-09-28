@@ -256,6 +256,6 @@ memex serve-http --host 127.0.0.1 --port 8931
 
 ## 已知限制
 
-- 嵌入模型首次加载较慢（默认 `paraphrase-multilingual-MiniLM-L12-v2`，384 维）。
+- 嵌入模型首次加载较慢（默认 `paraphrase-multilingual-MiniLM-L12-v2`，384 维，约 470MB）。**镜像不烘焙模型**：容器首启时自动下到卷内 HF 缓存（`docs/deployment.md` §5.2），下载期间 `/healthz` 的 `embedder_ready=false`。
 - 跨仓聚类的**精度有限**（见上文阈值一节）—— 模式是「线索」，不是「结论」。
 - 只支持 git 托管的仓库（`fetch_repo` 会校验 `repo_url` 宿主白名单）。
