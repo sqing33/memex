@@ -50,6 +50,18 @@ def _rpc_error(req_id: Any, code: int, message: str, data: Any = None) -> dict[s
     return {"jsonrpc": "2.0", "id": req_id, "error": err}
 
 
+def _denied(message: str) -> dict[str, Any]:
+    """bundle 端点校验失败时的统一响应信封。
+
+    HTTP 状态码按 deployment.md §4.2 取 403（签名错/过期一律 403，不区分
+    「不存在」与「签名错」，避免向未持票据的一方泄露 bundle 是否存在）；
+    错误码取 invalid_argument —— ERROR_CODES 是全局封闭集（新增要改
+    docs/mcp-tools.md），而契约对 bundle 失败只规定 HTTP 码、未指定 error.code，
+    故复用既有码，不动契约。
+    """
+    return {"ok": False, "error": {"code": "invalid_argument", "message": message}}
+
+
 class Server:
     """与传输无关的 JSON-RPC 分派器。"""
 
@@ -369,7 +381,12 @@ def serve_http(cfg: Config | None = None, *, host: str = "127.0.0.1", port: int 
                     },
                 )
                 return
-            self._send(200, path.read_bytes(), ctype="application/octet-stream")
+            self._send(
+                200,
+                path.read_bytes(),
+                ctype="application/octet-stream",
+                extra={"Content-Disposition": "attachment"},
+            )
 
         def do_GET(self) -> None:  # noqa: N802
             route = self._route()
