@@ -70,35 +70,62 @@ class Runtime:
     def __init__(self, cfg: Config, *, client_name: str | None = None):
         self.cfg = cfg
         self.client_name = client_name
-        self._conn: sqlite3.Connection | None = None
+        # 数据库连接**按线程局部**（A5：serve-http 是每请求一线程，见 conn 属性说明）。
+        self._tls = threading.local()
+        # 本进程已建立的全部连接的注册表，供 close() 一次性释放文件句柄。
+        self._conns: list[sqlite3.Connection] = []
+        self._conns_lock = threading.Lock()
         self._embedder: Embedder | None = None
         self._embedder_error: MemexError | None = None
         self._warm_started = False
 
     @property
     def conn(self) -> sqlite3.Connection:
-        """懒开库连接。库不存在时显式报错，绝不让 connect() 建出空壳库。
+        """懒开库连接（**每线程一个**）。库不存在时显式报错，绝不让 connect() 建出空壳库。
 
         store.connect 会 mkdir 并 connect，于是缺失的 db 路径会变成一个 0 字节的
         空文件：随后的 SQL 抛 "no such table: xxx"，被 dispatch 兜成 internal /
         服务端异常，agent 只会重试。启动检查（startup.py）本来就会拒启，但懒连接
         这条路径绕过了它——所以这里必须自己把关。
+
+        为什么线程局部而不是「一个共享连接」（A5）：远程形态是 ThreadingHTTPServer，
+        每请求一线程，而全进程只有一个 Runtime。共享单个连接时 pysqlite 的语句缓存
+        （cached_statements）会让并发线程复用同一条 sqlite3_stmt：一条线程
+        sqlite3_step 推进游标，另一条线程 reset/step 同一句，结果集被当场吃掉 ——
+        对外就是 _t12_list_repos 里 dict(r) 抛 IndexError: tuple index out of range
+        （实测 n=8 即现）。加一把全局锁只是把「随机崩」换成「全串行」；线程局部
+        连接才是真并发：每线程独享游标状态，线程间不共享任何可变状态。跨线程写
+        仍由 SQLite 自己仲裁（WAL + busy_timeout 30s 忙等，见 store/db.py）。
         """
-        if self._conn is None:
-            if not self.cfg.paths.db.exists():
-                raise MemexError(
-                    "not_found",
-                    "知识库不存在，请先运行 memex init",
-                    {"db": str(self.cfg.paths.db)},
-                )
-            self._conn = store.connect(self.cfg.paths.db)
-        return self._conn
+        conn = getattr(self._tls, "conn", None)
+        if conn is not None:
+            return conn
+        if not self.cfg.paths.db.exists():
+            raise MemexError(
+                "not_found",
+                "知识库不存在，请先运行 memex init",
+                {"db": str(self.cfg.paths.db)},
+            )
+        conn = store.connect(self.cfg.paths.db)
+        self._tls.conn = conn
+        with self._conns_lock:
+            self._conns.append(conn)
+        return conn
+
+    @property
+    def embedder_ready(self) -> bool:
+        """嵌入器是否已就绪（真模型已加载进本进程）。
+
+        给 /healthz 用（B3）：预热跑在后台线程里，healthz 要能如实回答
+        「现在能不能做需要向量的调用」，而不是去猜。**只读、零副作用**。
+        """
+        return self._embedder is not None
 
     def _resolve_embedder_spec(self) -> str | None:
         """解析当前应使用的嵌入器规格（配置优先，其次库 meta）。
 
-        用**独立短连接**读 meta：绝不碰 self._conn，避免把共享连接绑定到
-        预热线程（SQLite 连接有线程亲和性）。
+        用**独立短连接**读 meta：不复用任何请求线程的连接，免得把预热线程
+        的读写搅进正在跑的请求里（连接虽是线程局部，但预热期抢锁没意义）。
         """
         if self.cfg.embedder:
             return self.cfg.embedder
@@ -147,12 +174,30 @@ class Runtime:
         threading.Thread(target=_run, name="memex-embedder-warm", daemon=True).start()
 
     def close(self) -> None:
-        if self._conn is not None:
+        """关闭本进程已建立的全部线程局部连接（停服 / 换库时调用）。
+
+        选「注册表 + 跨线程 close」而不是「打已关闭标记、下次访问时惰性关」：
+        后者关不掉那些**再也不会被访问**的线程的连接，文件句柄一直吊着——Windows 上
+        句柄不还，memex.db 连同 -wal / -shm 就删不掉，备份脚本也会被锁住。那正是
+        「零假成功」的反面：close() 看着成功了，资源其实没释放。
+
+        跨线程 close 之所以合法：store.connect 固定传 check_same_thread=False，
+        且 threadsafety < 3 时它直接抛 MemexError（store/db.py:53-70）——
+        能建出连接就意味着 SQLite 是 serialized 编译的，连接本就允许跨线程用。
+        万一某个连接关不掉（正被别人用着），**逐个吞掉异常继续关其余的**：
+        关不掉一个绝不能连累其它连接。
+        """
+        with self._conns_lock:
+            conns = self._conns
+            self._conns = []
+        for conn in conns:
             try:
-                self._conn.close()
-            except Exception:  # noqa: BLE001 - 连接可能绑定在其他线程
+                conn.close()
+            except Exception:  # noqa: BLE001 - 单个连接关不掉不影响其余的释放
                 pass
-            self._conn = None
+        # 换一个全新的 threading.local：所有线程的旧连接槽位随之作废。
+        # close() 之后再次访问 conn 会重新开连接（与旧语义一致，不是永久关闭）。
+        self._tls = threading.local()
 
 
 # --------------------------------------------------------------------------- #
@@ -1288,13 +1333,23 @@ def _t16_forget_repo(rt: Runtime, args: dict[str, Any]) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 @handler("upload_repo_bundle")
 def _t17_upload_repo_bundle(rt: Runtime, args: dict[str, Any]) -> dict[str, Any]:
-    bundle_path = _req_str(args, "bundle_path")
+    # A2/D3：bundle_path 与 bundle_url 二选一。空串一律折成 None，好让「必须二选一」
+    # 的判据只在真正的「都没给」时才触发。
+    bundle_path = _opt_str(args, "bundle_path") or None
+    bundle_url = _opt_str(args, "bundle_url") or None
     repo_url = _req_str(args, "repo_url")
     ref = _opt_str(args, "ref")
     subpath = _opt_str(args, "subpath")
     sha256 = _opt_str(args, "sha256")
     res = upload_repo_bundle(
-        rt.cfg, bundle_path, repo_url, ref=ref, subpath=subpath, sha256=sha256, conn=rt.conn
+        rt.cfg,
+        bundle_path,
+        repo_url,
+        bundle_url=bundle_url,
+        ref=ref,
+        subpath=subpath,
+        sha256=sha256,
+        conn=rt.conn,
     )
     repo = res["repo"]
     payload: dict[str, Any] = {

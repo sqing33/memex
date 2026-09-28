@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import tempfile
 import threading
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -22,8 +25,21 @@ from . import gitutil
 from .detect import detect_language
 from .hostmeta import HostMeta, fetch_host_meta
 
-# 克隆并发闸（G7：max 3）。stdio 单进程即可生效；serve-http 由线程共享。
-_CLONE_GATE = threading.Semaphore(3)
+# 克隆并发闸（G7）：按 cfg.clone_concurrency 建闸并复用。
+# 旧实现是模块级 `Semaphore(3)` 硬编码——`MEMEX_CLONE_CONCURRENCY` 声明了却永远不生效。
+_GATES: dict[int, threading.Semaphore] = {}
+_GATES_LOCK = threading.Lock()
+
+
+def _clone_gate(cfg: Config) -> threading.Semaphore:
+    """取（或建）该并发度对应的闸。同一进程内 n 相同的调用者共享一个闸。"""
+    n = max(1, int(cfg.clone_concurrency or 3))
+    with _GATES_LOCK:
+        gate = _GATES.get(n)
+        if gate is None:
+            gate = threading.Semaphore(n)
+            _GATES[n] = gate
+        return gate
 
 
 def _merge_renamed(
@@ -223,7 +239,7 @@ def ensure_repo(
                 "warnings": warnings,
             }
 
-        with _CLONE_GATE:
+        with _clone_gate(cfg):
             result = gitutil.clone(cfg, ref, path, ref_name=ref_name)
 
         stale = False
@@ -297,7 +313,99 @@ def fetch_repo(
     return ensure_repo(cfg, parsed, ref_name=ref, subpath=subpath, refresh=refresh, conn=conn)
 
 
+def _download_bundle(cfg: Config, url: str) -> Path:
+    """T17 远程变体：把 agent 给的 bundle_url 拉到本地临时文件。
+
+    两处刻意的取舍：
+
+    - **边下边数**：不能先落盘再查大小——一个超大响应会先把磁盘写满再报错。
+      每读一块即累加，超 cfg.max_bundle_bytes 立刻中止并删残片。
+    - **只接受 http(s)**：file:// 会被 urllib 当成读本地文件，那等于给远程 agent
+      一个「读服务器任意路径」的入口（T17 是离线/私有仓的补口，不是本地读文件器），直接拒。
+    """
+    if not (url.startswith("http://") or url.startswith("https://")):
+        raise MemexError("invalid_argument", "bundle_url 只接受 http(s) 直链", {"bundle_url": url})
+    limit = max(1, int(cfg.max_bundle_bytes))
+    fd, tmp = tempfile.mkstemp(prefix="memex-bundle-", suffix=".bundle")
+    os.close(fd)
+    tmp_path = Path(tmp)
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "memex"})
+        with urllib.request.urlopen(req, timeout=120) as fh:  # noqa: S310 (调用方给的直链)
+            total = 0
+            with tmp_path.open("wb") as out:
+                while True:
+                    block = fh.read(1 << 20)
+                    if not block:
+                        break
+                    total += len(block)
+                    if total > limit:
+                        raise MemexError(
+                            "invalid_argument",
+                            "bundle 超过内存上限",
+                            {"bytes": total, "max_bundle_bytes": limit},
+                        )
+                    out.write(block)
+        return tmp_path
+    except MemexError:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    except (urllib.error.URLError, OSError) as exc:
+        tmp_path.unlink(missing_ok=True)
+        raise MemexError(
+            "invalid_argument", "bundle_url 下载失败", {"bundle_url": url, "reason": str(exc)}
+        ) from exc
+
+
 def upload_repo_bundle(
+    cfg: Config,
+    bundle_path: str | None,
+    repo_url: str,
+    *,
+    bundle_url: str | None = None,
+    ref: str | None = None,
+    subpath: str | None = None,
+    sha256: str | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> dict[str, Any]:
+    """T17 入口：两种投喂方式二选一（deployment.md A2/D3）。
+
+    - bundle_path：**仅本地形态**——server 与 agent 同机，给服务器上的路径。
+    - bundle_url：**远程形态主路径**——agent 在有凭据的一端 git bundle 后传到自己的
+      对象存储（预签名 OSS/S3 直链），server 匿名 GET 拉回。远程形态下 agent 手里没有
+      服务器路径，bundle_path 送不进来，这正是补 bundle_url 的原因。
+
+    选定的文件交给 _ingest_bundle 走 verify -> clone -> 登记。
+    """
+    if (bundle_path is None) == (bundle_url is None):
+        raise MemexError(
+            "invalid_argument",
+            "bundle_path 与 bundle_url 必须二选一",
+            {"bundle_path": bundle_path, "bundle_url": bundle_url},
+        )
+    if bundle_path is not None and cfg.is_http:
+        raise MemexError(
+            "invalid_argument",
+            "远程形态不接受 bundle_path（那是服务器本地路径）；请改用 bundle_url",
+            {"hint": "bundle_url"},
+        )
+    downloaded: Path | None = None
+    try:
+        if bundle_url is not None:
+            downloaded = _download_bundle(cfg, bundle_url)
+            local = str(downloaded)
+        else:
+            assert bundle_path is not None
+            local = bundle_path
+        return _ingest_bundle(
+            cfg, local, repo_url, ref=ref, subpath=subpath, sha256=sha256, conn=conn
+        )
+    finally:
+        if downloaded is not None:
+            downloaded.unlink(missing_ok=True)
+
+
+def _ingest_bundle(
     cfg: Config,
     bundle_path: str,
     repo_url: str,
@@ -307,7 +415,7 @@ def upload_repo_bundle(
     sha256: str | None = None,
     conn: sqlite3.Connection | None = None,
 ) -> dict[str, Any]:
-    """T17：上传 git bundle -> verify -> clone；source='upload'（§1.5）。
+    """T17 的后半段（对本地文件）：verify -> clone -> 登记；source='upload'（§1.5）。
 
     大小上限 MEMEX_MAX_BUNDLE_BYTES；sha256 不符直接 invalid_argument，绝不落半行。
     """

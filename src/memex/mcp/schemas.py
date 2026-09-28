@@ -280,10 +280,13 @@ _TOOLS: dict[str, dict[str, Any]] = {
         "category": "write",
         "annotations": _ann("Upload repo bundle", False, False, True, False),
         "input": {
-            "bundle_path": {"type": "string"}, "repo_url": {"type": "string"},
+            # A2/D3：bundle_path 与 bundle_url 二选一，哪个都不能单独标必填；真正的
+            # 「必须二选一」由 handler 判定（这里只描述形状）。
+            "bundle_path": {"type": "string"}, "bundle_url": {"type": "string"},
+            "repo_url": {"type": "string"},
             "ref": {"type": "string"}, "subpath": {"type": "string"}, "sha256": {"type": "string"},
         },
-        "required": ["bundle_path", "repo_url"],
+        "required": ["repo_url"],
         "payload": {
             "repo": {"type": "object"}, "commit_sha": {"type": "string"},
             "bytes": {"type": "integer"}, "repo_path": {"type": "string"},

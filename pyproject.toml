@@ -16,8 +16,8 @@ dependencies = []
 default = ["numpy>=1.26", "sentence-transformers>=2.5"]
 # 可选层：多语言语法校验
 analysis = ["tree-sitter>=0.21"]
-# 远程 HTTP 形态（缺省时退标准库 http.server）
-http = ["uvicorn>=0.29", "starlette>=0.37"]
+# 注：远程 HTTP 形态（serve-http）恒用标准库 ThreadingHTTPServer，
+# 不引入任何第三方 ASGI 依赖，故无 http extra（D6）。
 dev = ["pytest>=8", "mypy>=1.10"]
 
 [project.scripts]

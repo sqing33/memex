@@ -1,9 +1,12 @@
 """MCP 服务端：stdio（本地）与 Streamable HTTP（远程）。
 
 - **stdio**：换行分隔的 JSON-RPC，读 stdin / 写 stdout（本地形态，见 tech-design §4.1）。
-- **serve-http**：单个 `/mcp` 端点，POST + GET，**只收 application/json，不出 SSE**
-  （E15）。强制校验 `Origin`；认证用静态 Bearer Token（E16）。`Mcp-Session-Id`
-  是传输层会话标识，**与业务 session_id 无关**。
+- **serve-http**：**三个**端点——`POST /mcp`（JSON-RPC）、`GET /bundles/{repo_id}`
+  （bundle 下载，票据即凭证）、`GET /healthz`（容器探活）。`/mcp` **只收
+  application/json，不出 SSE**（E15）。强制校验 `Origin`（`MEMEX_ALLOWED_ORIGINS`
+  白名单）；认证用静态 Bearer Token（E16）。**不下发 `Mcp-Session-Id`**：本服务无跨请求
+  传输层状态（业务 session 走 `session_id`，在库里），发一个只写不查的头等于假装有状态
+  ——旧实现就是 `sessions.add(sid)` 之后再没人读过。
 
 协议约定（docs/mcp-tools.md §1.14 / G27）：
 
@@ -15,10 +18,12 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
+import time
 from typing import Any
 
 from .. import __version__, session
-from ..core import Config
+from ..core import Config, MemexError
 from . import handlers
 from ..startup import run_startup_check, startup_banner
 from .handlers import ProtocolError, Runtime
@@ -205,23 +210,90 @@ def serve_stdio(cfg: Config | None = None) -> None:
 def _with_is_http(cfg: Config, value: bool) -> Config:
     try:
         cfg.is_http = value
+        if value:
+            # A3/D5：远程形态**恒不接受本地路径**。
+            # 以前这条是「碰巧」成立的：from_env 里 allow_local_paths 的默认值是
+            # `not is_http`，但 _with_is_http 只改 is_http 不重算，而 cli 的 _config()
+            # 从不设 MEMEX_IS_HTTP —— 于是远程实际拿到 True。
+            # 更糟的是旧的 _check_origin 把同一个布尔当成「本机形态放行任意 Origin」的
+            # 开关，一个布尔控制了两件不相干的事。现已拆开：本地路径由这里钉死，
+            # Origin 由 MEMEX_ALLOWED_ORIGINS 管。
+            cfg.allow_local_paths = False
     except Exception:  # noqa: BLE001
         pass
     return cfg
 
 
 # --------------------------------------------------------------------------- #
+# 限流（G7 / A7）
+# --------------------------------------------------------------------------- #
+class _TokenBucket:
+    """按 token 的令牌桶。单进程内共享，线程安全。
+
+    以前 `cfg.http_qps_per_token` 全仓只有「声明赋值」没有消费点，
+    `rate_limited` 这个错误码从没有任何一处真的会抛出来——
+    operations.md 与 mcp-tools.md 承诺的 `details.retry_after_seconds` 因此是空头支票。
+    端口映射到公网之后这就是必需品：没有它，拿到 token 的一方可以无限打。
+    """
+
+    def __init__(self, qps: int, *, burst: int | None = None) -> None:
+        self.qps = max(1, int(qps))
+        self.burst = max(1, int(burst if burst is not None else self.qps))
+        self._buckets: dict[str, tuple[float, float]] = {}  # key -> (剩余令牌, 上次时间)
+        self._lock = threading.Lock()
+
+    def allow(self, key: str) -> float:
+        """扣一个令牌。返回 0.0 表示放行；返回 >0 表示还要等多少秒。"""
+        now = time.monotonic()
+        with self._lock:
+            tokens, ts = self._buckets.get(key, (float(self.burst), now))
+            tokens = min(float(self.burst), tokens + (now - ts) * self.qps)
+            if tokens >= 1.0:
+                self._buckets[key] = (tokens - 1.0, now)
+                return 0.0
+            # 陈旧桶（久未使用）顺手清掉，否则 key 无界增长
+            if len(self._buckets) > 64:
+                self._buckets = {k: v for k, v in self._buckets.items() if now - v[1] < 300.0}
+            self._buckets[key] = (tokens, now)
+            return (1.0 - tokens) / self.qps
+
+
+def _health_payload(rt: Any, cfg: Config) -> dict[str, Any]:
+    """`/healthz` 响应体。**不泄露路径 / token / 用户名**——它挂在公开端点上。"""
+    ready = bool(getattr(rt, "embedder_ready", False))
+    return {
+        "ok": True,
+        "status": "ok" if ready else "warming",
+        "version": __version__,
+        "embedder_ready": ready,
+        "degraded": (cfg.embedder or "").strip().startswith("hash:"),
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Streamable HTTP 传输（单 /mcp 端点，JSON-only，无 SSE）
 # --------------------------------------------------------------------------- #
 def serve_http(cfg: Config | None = None, *, host: str = "127.0.0.1", port: int = 8931) -> None:
-    import uuid
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import parse_qs, unquote
 
     resolved: Config = _with_is_http(cfg or Config.from_env(), True)
+    # B1：远程形态必须给绝对基址。没有它，T4 只能退回 file:// 形态，远程 agent
+    # 拿到的是死链——而 bundle 下发正是「远程可用」的第一根杠杆。缺省拒启，
+    # 不给「配了但没生效」的中间态。
+    if not resolved.public_base_url:
+        sys.stderr.write(
+            "memex 启动失败 [invalid_argument]：远程形态必须设置 MEMEX_PUBLIC_BASE_URL\n"
+            "  原因：T4 下发的 bundle 票据要拼绝对 URL；缺了它 agent 拿到的仍是 file://，\n"
+            "        在远程机器上打不开。\n"
+            "  示例：MEMEX_PUBLIC_BASE_URL=https://memex.example.com\n"
+        )
+        sys.stderr.flush()
+        raise SystemExit(2)
     _startup_or_exit(resolved)
     server = Server(resolved)
     server.rt.warm()  # 后台预热嵌入模型，不阻塞 initialize（D1/G22）
-    sessions: set[str] = set()
+    limiter = _TokenBucket(resolved.http_qps_per_token)
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -242,20 +314,73 @@ def serve_http(cfg: Config | None = None, *, host: str = "127.0.0.1", port: int 
         def _json(self, code: int, obj: Any, extra: dict[str, str] | None = None) -> None:
             self._send(code, json.dumps(obj, ensure_ascii=False).encode("utf-8"), extra=extra)
 
+        def _route(self) -> str:
+            return self.path.split("?", 1)[0].rstrip("/") or "/"
+
         def _check_origin(self) -> bool:
             origin = self.headers.get("Origin")
             if origin is None:
+                # 没有 Origin 头 = 不是浏览器发出来的：MCP 客户端、curl、git 都走
+                # 这条路径，远程接入的正常流量本来就全在这里。
                 return True
-            if resolved.allow_local_paths:
-                return True
-            return False
+            # 有 Origin 就必须在白名单里（tech-design §4.4 的防 DNS rebinding）。
+            # 旧实现把它绑在 allow_local_paths 上，已于 _with_is_http 注释里说明。
+            return origin.strip().rstrip("/") in resolved.allowed_origins
 
         def _check_auth(self) -> bool:
             auth = self.headers.get("Authorization", "")
             return auth == "Bearer " + resolved.token
 
+        def _serve_bundle(self, rest: str) -> None:
+            """GET /bundles/{repo_id}?commit=&exp=&sig=
+
+            票据即凭证，不校验 Bearer——agent 的 git clone/curl 不便带头。
+            校验失败一律 403，不区分「不存在」与「签名错」：区分开等于向未持票据的
+            一方泄露 bundle 是否存在。
+            """
+            from ..fetch import bundle as bundle_mod
+
+            query = parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+            repo_id = unquote(rest)
+            commit = (query.get("commit") or [""])[0]
+            exp = (query.get("exp") or [""])[0]
+            sig = (query.get("sig") or [""])[0]
+            if not bundle_mod.repo_id_is_safe(repo_id):
+                self._json(403, _denied("bundle 票据无效或已过期"))
+                return
+            if not bundle_mod.verify_ticket(resolved, repo_id, commit, exp, sig):
+                self._json(403, _denied("bundle 票据无效或已过期"))
+                return
+            try:
+                path = bundle_mod.bundle_path_for(resolved, repo_id, commit)
+            except MemexError:
+                self._json(403, _denied("bundle 票据无效或已过期"))
+                return
+            if not path.is_file():
+                # 票据有效但产物被 LRU 清掉了：让 agent 重新调一次 T4 即可。
+                self._json(
+                    404,
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "not_found",
+                            "message": "bundle 已被清理，请重新调用 request_repo_bundle",
+                        },
+                    },
+                )
+                return
+            self._send(200, path.read_bytes(), ctype="application/octet-stream")
+
         def do_GET(self) -> None:  # noqa: N802
-            if self.path.rstrip("/") != "/mcp":
+            route = self._route()
+            if route == "/healthz":
+                # 探活不带 Bearer：容器 healthcheck 不便持有密钥，响应体也不含敏感信息。
+                self._json(200, _health_payload(server.rt, resolved))
+                return
+            if route.startswith("/bundles/"):
+                self._serve_bundle(route[len("/bundles/"):])
+                return
+            if route != "/mcp":
                 self._json(404, {"error": "not found"})
                 return
             if not self._check_auth():
@@ -265,7 +390,7 @@ def serve_http(cfg: Config | None = None, *, host: str = "127.0.0.1", port: int 
             self._json(405, {"error": "GET 不提供事件流（json-only）"})
 
         def do_POST(self) -> None:  # noqa: N802
-            if self.path.rstrip("/") != "/mcp":
+            if self._route() != "/mcp":
                 self._json(404, {"error": "not found"})
                 return
             if not self._check_origin():
@@ -273,6 +398,21 @@ def serve_http(cfg: Config | None = None, *, host: str = "127.0.0.1", port: int 
                 return
             if not self._check_auth():
                 self._json(401, {"error": "unauthorized"})
+                return
+            retry = limiter.allow(resolved.token or "-")
+            if retry > 0:
+                self._json(
+                    429,
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "rate_limited",
+                            "message": "超过 MEMEX_HTTP_QPS_PER_TOKEN 配额",
+                            "details": {"retry_after_seconds": round(retry, 3)},
+                        },
+                    },
+                    extra={"Retry-After": str(max(1, int(retry) + 1))},
+                )
                 return
             ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip()
             if ctype != "application/json":
@@ -286,21 +426,15 @@ def serve_http(cfg: Config | None = None, *, host: str = "127.0.0.1", port: int 
                 self._json(200, _rpc_error(None, PARSE_ERROR, "JSON 解析失败"))
                 return
             resp = server.handle_message(msg)
-            extra = {}
-            sid = self.headers.get("Mcp-Session-Id")
-            if sid:
-                sessions.add(sid)
-            elif msg.get("method") == "initialize":
-                extra["Mcp-Session-Id"] = uuid.uuid4().hex
+            # D7：不再下发 Mcp-Session-Id。本服务没有跨请求的传输层状态可关联，
+            # 下发一个只写不查的头等于对外承诺了一个不存在的会话模型。
             if resp is None:
-                self._send(202, b"", extra=extra)
+                self._send(202, b"")
                 return
-            self._json(200, resp, extra=extra)
+            self._json(200, resp)
 
     # 后台清扫：manager.sweep 的 docstring 与 operations.md §1 都承诺过这条路径。
     # 远程常驻时纯靠「下一次工具调用」不够——没人调用就永远不清扫，故后台线程是必需的。
-    import threading
-
     _stop = threading.Event()
 
     def _sweeper() -> None:

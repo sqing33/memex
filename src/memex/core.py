@@ -70,7 +70,10 @@ class Paths:
 
     @property
     def index_db(self) -> Path:
-        """远程形态的索引分库（E17）；本地形态与 memex.db 合一。"""
+        """派生 3 表（chunks/chunk_vectors/chunk_fts）的索引分库（E17）。
+
+        两种形态都真拆：`store.db.connect()` 连 main 后 `ATTACH DATABASE index.db AS idx`，
+        派生表的 DDL 写 idx. 限定名，其余模块照旧用裸名。"""
         return self.home / "index.db"
 
     @property
@@ -81,6 +84,16 @@ class Paths:
     def repos_dir(self) -> Path:
         """`repos` 的别名（部分模块以 dir 结尾更好读）。"""
         return self.home / "repos"
+
+    @property
+    def bundles(self) -> Path:
+        """bundle 下发产物的存放目录（deployment.md §2 拓扑的 `bundles/`）。
+
+        与 `repos/` 分开：前者是可随时重新生成的传输产物（靠 LRU 有界），
+        后者是按需重新 clone 的工作副本。混在一起会让「repos 可重建、bundles 有界」
+        两条运维结论都说不清。
+        """
+        return self.home / "bundles"
 
     @property
     def site(self) -> Path:
@@ -207,8 +220,11 @@ def unit_thresholds() -> dict[str, int]:
 
 
 # ——————————————————————————————— 配置 ———————————————————————————————
-def _env_int(name: str, default: int) -> int:
-    raw = os.environ.get(name)
+def _env_int(name: str, default: int, env: Mapping[str, str] | None = None) -> int:
+    # env 形参必须真被用上：原实现直接读 os.environ，导致 from_env(env=...) 传进来的
+    # 映射形同虚设，13 项配置静默取真实进程环境，新配置（allowed_origins 等）无法在
+    # 测试里构造。所有调用点都从 from_env 转发 e。
+    raw = (os.environ if env is None else env).get(name)
     if raw is None or raw == "":
         return default
     try:
@@ -217,8 +233,8 @@ def _env_int(name: str, default: int) -> int:
         raise MemexError("invalid_argument", f"环境变量 {name} 不是整数：{raw!r}") from None
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    raw = os.environ.get(name)
+def _env_bool(name: str, default: bool, env: Mapping[str, str] | None = None) -> bool:
+    raw = (os.environ if env is None else env).get(name)
     if raw is None or raw == "":
         return default
     return raw.strip().lower() in ("1", "true", "yes", "on")
@@ -257,6 +273,16 @@ class Config:
     # 远程形态
     token: str = ""
     is_http: bool = False
+    # 绝对基址（B1）：T4 的 bundle 票据 URL 由服务端自拼。远程必填——没有它就没有
+    # agent 能用的下载 URL，V1 遗留的 file:// 形态对远程 agent 毫无意义。
+    public_base_url: str = ""
+    # Origin 白名单（A4/B2）：**无 Origin 头放行**（git / curl / MCP 客户端都不是浏览器），
+    # 有则必须在此列表内。绝不再拿 allow_local_paths 当 Origin 开关——那正是
+    # 远程形态任意 Origin 全放行的根因（tech-design §4.4 要求防 DNS rebinding）。
+    allowed_origins: tuple[str, ...] = ()
+    # bundle 票据有效期（秒）：原为 bundle.py 里的模块常量 BUNDLE_TTL_SECONDS，
+    # 收进配置才能按部署调整。
+    bundle_ttl_seconds: int = 3600
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Config":
@@ -296,22 +322,29 @@ class Config:
             hosts=hosts,
             git_tokens=tokens,
             git_mirror=e.get("MEMEX_GIT_MIRROR", ""),
-            allow_local_paths=_env_bool("MEMEX_ALLOW_LOCAL_PATHS", not is_http),
-            host_meta=_env_bool("MEMEX_HOST_META", True),
-            clone_timeout=_env_int("MEMEX_CLONE_TIMEOUT", 300),
-            clone_concurrency=_env_int("MEMEX_CLONE_CONCURRENCY", 3),
-            max_file_bytes=_env_int("MEMEX_MAX_FILE_BYTES", 1_048_576),
-            max_repo_bytes=_env_int("MEMEX_MAX_REPO_BYTES", 2_147_483_648),
-            max_bundle_bytes=_env_int("MEMEX_MAX_BUNDLE_BYTES", 536_870_912),
-            http_qps_per_token=_env_int("MEMEX_HTTP_QPS_PER_TOKEN", 30),
-            embed_concurrency=_env_int("MEMEX_EMBED_CONCURRENCY", 1),
-            pattern_chunk_max_units=_env_int("MEMEX_PATTERN_CHUNK_MAX_UNITS", 60),
+            allow_local_paths=_env_bool("MEMEX_ALLOW_LOCAL_PATHS", not is_http, e),
+            host_meta=_env_bool("MEMEX_HOST_META", True, e),
+            clone_timeout=_env_int("MEMEX_CLONE_TIMEOUT", 300, e),
+            clone_concurrency=_env_int("MEMEX_CLONE_CONCURRENCY", 3, e),
+            max_file_bytes=_env_int("MEMEX_MAX_FILE_BYTES", 1_048_576, e),
+            max_repo_bytes=_env_int("MEMEX_MAX_REPO_BYTES", 2_147_483_648, e),
+            max_bundle_bytes=_env_int("MEMEX_MAX_BUNDLE_BYTES", 536_870_912, e),
+            http_qps_per_token=_env_int("MEMEX_HTTP_QPS_PER_TOKEN", 30, e),
+            embed_concurrency=_env_int("MEMEX_EMBED_CONCURRENCY", 1, e),
+            pattern_chunk_max_units=_env_int("MEMEX_PATTERN_CHUNK_MAX_UNITS", 60, e),
             embedder=e.get("MEMEX_EMBEDDER", ""),
             rerank=e.get("MEMEX_RERANK", "off"),
-            session_ttl_seconds=_env_int("MEMEX_SESSION_TTL_SECONDS", 7200),
-            session_retention_seconds=_env_int("MEMEX_SESSION_RETENTION_SECONDS", 604_800),
+            session_ttl_seconds=_env_int("MEMEX_SESSION_TTL_SECONDS", 7200, e),
+            session_retention_seconds=_env_int("MEMEX_SESSION_RETENTION_SECONDS", 604_800, e),
             token=e.get("MEMEX_TOKEN", ""),
             is_http=is_http,
+            public_base_url=e.get("MEMEX_PUBLIC_BASE_URL", "").strip().rstrip("/"),
+            allowed_origins=tuple(
+                o.strip().rstrip("/")
+                for o in e.get("MEMEX_ALLOWED_ORIGINS", "").split(",")
+                if o.strip()
+            ),
+            bundle_ttl_seconds=_env_int("MEMEX_BUNDLE_TTL_SECONDS", 3600, e),
         )
 
     @property
