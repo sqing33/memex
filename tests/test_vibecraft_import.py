@@ -17,6 +17,18 @@ from memex.import_ import vibecraft
 from memex.store import db as store_db
 
 
+@pytest.fixture(autouse=True)
+def _hash_embedder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """回填默认走 hash:64。
+
+    本文件测的是 analyses.status 口径与索引闭环，不测真实语义嵌入；而
+    import_vibecraft 未显式传 cfg 时会走 Config.from_env()，未设 MEMEX_EMBEDDER
+    即默认 sentence-transformers（可选依赖，CI/本机常未安装）→ 直接 MemexError。
+    固定成 hash:64 让这组用例不依赖可选依赖。
+    """
+    monkeypatch.setenv("MEMEX_EMBEDDER", "hash:64")
+
+
 def _make_source_db(path: Path, repo_key: str, repo_root: Path) -> None:
     """造一个最小 VibeCraft 源库：1 仓 / 1 次分析 / 1 张卡 + 1 条证据。"""
     conn = sqlite3.connect(str(path))
@@ -104,8 +116,8 @@ def _setup(tmp_path: Path) -> tuple[Paths, Path]:
 
 
 def _rows(paths: Paths, sql: str, *params: object) -> list[sqlite3.Row]:
-    conn = sqlite3.connect(str(paths.db))
-    conn.row_factory = sqlite3.Row
+    # E17 真拆：chunks 在 index.db，必须走 store_db.connect 才能读到。
+    conn = store_db.connect(str(paths.db))
     try:
         return conn.execute(sql, params).fetchall()
     finally:
@@ -212,7 +224,8 @@ def test_vibecraft_import_preserves_fork_and_alias_relations(tmp_path: Path) -> 
     paths, src_db = _setup(tmp_path)
     # 先建表再种数据：import_vibecraft 自己会建库，但这里要提前往 repos 里塞关系
     store_db.init_db(paths, embedder_spec="hash:64")
-    conn = sqlite3.connect(str(paths.db))
+
+    conn = store_db.connect(str(paths.db))
     conn.row_factory = sqlite3.Row
     try:
         conn.execute(

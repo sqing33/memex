@@ -1,11 +1,16 @@
 """SQLite 存储层：建库、迁移、重索引、统计、硬删除。
 
 设计要点（tech-design §2.2 / §2.3）：
-- 单文件 memex.db；开 WAL、外键、busy_timeout；
+- **两库真拆**（E17）：真源 11 表落 `memex.db`（main），派生 3 表
+  （chunks / chunk_vectors / chunk_fts）落 `index.db`；连接时
+  `ATTACH DATABASE index.db AS idx`。派生表的 DDL 与索引一律写成 `idx.` 限定名，
+  其余模块照旧用裸表名（SQLite 会把裸名解析到 idx，实测）。
+- 开 WAL、外键、busy_timeout；
 - 物理表共 14 张（文档正文写作「13 张」是历史口径，meta..session_stats 全部落库）；
 - 重建性分层：source（repos/analyses/features/cards/evidence，需备份）、
   derived（patterns/pattern_members/pattern_intents，可重算）、
-  index（chunks/chunk_vectors/chunk_fts，可重索引）；session_stats 永不删除。
+  index（chunks/chunk_vectors/chunk_fts，可重索引**且不进备份**）；session_stats 永不删除。
+- 旧版「14 张全在 memex.db」的库在 connect() 时自动搬去两库（_migrate_legacy_split）。
 
 json_loads/json_dumps 是全仓共用的 JSON 边界：容错解析 + 稳定序列化。
 """
@@ -30,6 +35,14 @@ _MIN_THREADSAFETY = 3
 # 所以 agent 提交与 VibeCraft 回填**都写 committed**（docs/mcp-tools.md T11 枚举里没有 ready）。
 # 派生表清空后若漏筛某条，它的索引就再也回不来——所以这里是全集，且有守卫函数兜底。
 _REINDEXABLE_STATUSES: tuple[str, ...] = ("committed", "ready")
+
+# ———— E17 真分库（派生 3 表落 index.db）————
+# ATTACH 后的别名。分库后派生表的 DDL 与索引必须写 idx. 限定名；
+# 其余模块照旧用裸名（SQLite 会把裸名解析到 idx，实测）。
+_INDEX_ALIAS = "idx"
+# 派生表：可 reindex 重建，不进备份（deployment.md §5.3 / §9）。
+DERIVED_TABLES: tuple[str, ...] = ("chunks", "chunk_vectors", "chunk_fts")
+
 
 # ———————————————————————————————— JSON 边界 ————————————————————————————————
 
@@ -80,6 +93,11 @@ def connect(path: str | Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 30000")
+    # E17 真拆：派生 3 表落 index.db，挂成 idx。必须在建任何表之前 ATTACH ——
+    # 否则 create_schema 会把派生表建到 main，成为又一个静默的假拆分。
+    idx_path = p.parent / "index.db"
+    conn.execute("ATTACH DATABASE ? AS " + _INDEX_ALIAS, (str(idx_path),))
+    conn.execute("PRAGMA " + _INDEX_ALIAS + ".journal_mode = WAL")
     return conn
 
 
@@ -180,7 +198,7 @@ DDL_STATEMENTS: tuple[str, ...] = (
         pattern_id TEXT NOT NULL REFERENCES patterns(pattern_id) ON DELETE CASCADE,
         text       TEXT NOT NULL
     )""",
-    """CREATE TABLE IF NOT EXISTS chunks (
+    """CREATE TABLE IF NOT EXISTS idx.chunks (
         chunk_id TEXT PRIMARY KEY,
         kind     TEXT NOT NULL,
         ref_id   TEXT,
@@ -191,13 +209,13 @@ DDL_STATEMENTS: tuple[str, ...] = (
         heading  TEXT,
         producer TEXT
     )""",
-    """CREATE TABLE IF NOT EXISTS chunk_vectors (
+    """CREATE TABLE IF NOT EXISTS idx.chunk_vectors (
         chunk_id TEXT PRIMARY KEY,
         embedder TEXT NOT NULL,
         dim      INTEGER NOT NULL,
         vec      BLOB NOT NULL
     )""",
-    """CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5 (
+    """CREATE VIRTUAL TABLE IF NOT EXISTS idx.chunk_fts USING fts5 (
         chunk_id UNINDEXED,
         text,
         tokenize = 'trigram'
@@ -229,9 +247,9 @@ INDEX_STATEMENTS: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_cards_feature ON cards(feature_id)",
     "CREATE INDEX IF NOT EXISTS idx_cards_reusable ON cards(reusable)",
     "CREATE INDEX IF NOT EXISTS idx_evidence_card ON evidence(card_id)",
-    "CREATE INDEX IF NOT EXISTS idx_chunks_kind ON chunks(kind)",
-    "CREATE INDEX IF NOT EXISTS idx_chunks_ref ON chunks(ref_id)",
-    "CREATE INDEX IF NOT EXISTS idx_chunks_repo ON chunks(repo_id)",
+    "CREATE INDEX IF NOT EXISTS idx.idx_chunks_kind ON chunks(kind)",
+    "CREATE INDEX IF NOT EXISTS idx.idx_chunks_ref ON chunks(ref_id)",
+    "CREATE INDEX IF NOT EXISTS idx.idx_chunks_repo ON chunks(repo_id)",
     "CREATE INDEX IF NOT EXISTS idx_pattern_members_card ON pattern_members(card_id)",
     "CREATE INDEX IF NOT EXISTS idx_sessions_repo ON sessions(repo_id)",
 )
@@ -254,7 +272,12 @@ def create_schema(conn: sqlite3.Connection) -> list[str]:
     """建表 / 建索引 / 补列（幂等）。返回 _ensure_columns 实际补上的列。
 
     返回值不是装饰：migrate 要靠它如实报告「这次迁移到底动了什么」。
+
+    E17：新建库直接就是两库（派生 3 表建在 idx）；旧库（派生表还在 main）
+    在这里一次性搬过去。搬迁必须在建表之前，否则 idx 里会先出现空的派生表，
+    后面的迁移就拷不进原有行了。
     """
+    _migrate_legacy_split(conn)
     for stmt in DDL_STATEMENTS:
         conn.execute(stmt)
     for stmt in INDEX_STATEMENTS:
@@ -271,7 +294,77 @@ _COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
 )
 
 
+def _migrate_legacy_split(conn: sqlite3.Connection) -> list[str]:
+    """把旧版「14 张全在 memex.db」的库搬成两库（E17）。幂等；返回实际搬过去的表名。
+
+    create_schema 在任何建表 DDL 之前调用它：否则 idx 会先出现空的派生表，
+    后面就拷不进原有行了。判据：main 里有 chunks、idx 里没有。
+
+    chunk_fts 是 fts5 虚表，带一堆影子表：不能只改虚表名（影子表会留在 main
+    形成两套影子表），也不能直接 ALTER ... RENAME TO idx.x（SQLite 报语法错）。
+    只能“读出行→写进 idx 的影子表”。
+    """
+    if not _table_in(conn, "main", "chunks") or _table_in(conn, _INDEX_ALIAS, "chunks"):
+        return []
+    for stmt in (
+        "CREATE TABLE IF NOT EXISTS idx.chunks ("
+        "chunk_id TEXT PRIMARY KEY, kind TEXT NOT NULL, ref_id TEXT, card_id TEXT, "
+        "text TEXT NOT NULL, repo_id TEXT, language TEXT, heading TEXT, producer TEXT)",
+        "CREATE TABLE IF NOT EXISTS idx.chunk_vectors ("
+        "chunk_id TEXT PRIMARY KEY, embedder TEXT NOT NULL, dim INTEGER NOT NULL, vec BLOB NOT NULL)",
+        "CREATE VIRTUAL TABLE IF NOT EXISTS idx.chunk_fts USING fts5("
+        "chunk_id UNINDEXED, text, tokenize = 'trigram')",
+    ):
+        conn.execute(stmt)
+
+    def cols(schema: str, table: str) -> set[str]:
+        return {str(r["name"]) for r in conn.execute(f"PRAGMA {schema}.table_info({table})")}
+
+    # 列名取交集：旧库可能比当前 DDL 少几列（例如 chunks.producer），不能硬拼列表。
+    all_cols = [
+        "chunk_id", "kind", "ref_id", "card_id", "text", "repo_id", "language", "heading",
+        "producer", "embedder", "dim", "vec",
+    ]
+    moved: list[str] = []
+    for table in ("chunks", "chunk_vectors"):
+        if not _table_in(conn, "main", table):
+            continue
+        mc = cols("main", table)
+        ic = cols("idx", table)
+        take = [c for c in all_cols if c in mc and c in ic]
+        names = ", ".join(take)
+        conn.execute(f"INSERT OR IGNORE INTO idx.{table}({names}) SELECT {names} FROM main.{table}")
+        conn.execute("DROP TABLE main." + table)
+        moved.append(table)
+
+    # 全文索引：影子表无法自行搬，只能读行重写到 idx 的影子表里。
+    if _table_in(conn, "main", "chunk_fts"):
+        if _table_in(conn, _INDEX_ALIAS, "chunk_fts"):
+            conn.execute("DROP TABLE idx.chunk_fts")
+        conn.execute("INSERT INTO idx.chunk_fts(chunk_id, text) SELECT chunk_id, text FROM main.chunk_fts")
+        conn.execute("DROP TABLE main.chunk_fts")
+        moved.append("chunk_fts")
+    return moved
+
+def _table_in(conn: sqlite3.Connection, schema: str, table: str) -> bool:
+    if schema == "main":
+        return conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1", (table,)
+        ).fetchone() is not None
+    row = conn.execute(
+        "SELECT 1 FROM " + schema + ".sqlite_master WHERE type='table' AND name=? LIMIT 1",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    """表在 main 或 idx 任一库里存在即可。
+
+    E17 真拆后派生 3 表在 idx，只看 sqlite_master（=main）会把它们当成不存在，
+    于是 _ensure_columns / assert_expected_columns 对 chunks.producer 彽彽失灵。
+    """
+    return _table_in(conn, "main", table) or _table_in(conn, _INDEX_ALIAS, table)
     row = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
     ).fetchone()

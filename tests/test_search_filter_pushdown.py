@@ -1,5 +1,4 @@
 import os
-import sqlite3
 
 import pytest
 
@@ -18,8 +17,9 @@ def conn(tmp_path):
     os.environ["MEMEX_HOME"] = str(tmp_path / "home")
     cfg = Config.from_env()
     store_db.init_db(cfg.paths, embedder_spec="hash:64")
-    c = sqlite3.connect(str(cfg.paths.db))
-    c.row_factory = sqlite3.Row
+    # E17 真拆后必须用 store_db.connect（它会 ATTACH index.db），
+    # 裸 sqlite3.connect 拿不到派生表 chunks。
+    c = store_db.connect(cfg.paths.db)
     yield c
     c.close()
 
