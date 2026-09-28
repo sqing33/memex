@@ -7,7 +7,7 @@ name = "memex"
 version = "0.0.1"
 description = "agent 驱动的跨仓库「实现借鉴」知识库"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = { text = "MIT" }
 dependencies = []
 

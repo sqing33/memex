@@ -148,7 +148,7 @@ memex 侧对反代的**唯一要求**（三条）：
 
 | 层 | 内容 | 理由 |
 |---|---|---|
-| base | `python:3.11-slim` + `git` | `git` binary 是硬依赖：T1 clone / T4 bundle / T17 verify 都要 |
+| base | `python:3.12-slim` + `git` | `git` binary 是硬依赖：T1 clone / T4 bundle / T17 verify 都要 |
 | deps | `pip install .[default]` | 嵌入模型必需；`analysis` extra **不进生产镜像**（`http` extra 已删，见下） |
 | model | `RUN` 预下载嵌入模型到 `/opt/memex-models` | 470MB 烘进镜像，见 §5.2 |
 | src | `pip install --no-deps .` | 装 `memex` 命令（`pyproject.toml:23-24`） |

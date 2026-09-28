@@ -128,7 +128,7 @@ def _remote_url(cfg: Config, repo_id: str, commit_sha: str, exp: int) -> str | N
         return None
     from urllib.parse import quote
 
-    # 注意：3.11 的 f-string 不能内嵌同型引号（PEP 701 要 3.12），故先转义再拼。
+    # 先 quote 再拼，避免在 f-string 里嵌套同型引号（3.12+ 虽已允许，显式转义仍更清楚）。
     rid = quote(repo_id, safe="")
     sha = quote(commit_sha, safe="")
     return f"{base}/bundles/{rid}?commit={sha}&exp={exp}&sig={sig}"
