@@ -45,15 +45,22 @@ PY
 
 # ---- model: 烘焙嵌入模型（不在请求路径上下载，见 deployment.md §5.2）----
 FROM deps AS model
-ENV HF_HOME=/opt/memex-models \
-    TRANSFORMERS_OFFLINE=1 \
-    HF_HUB_OFFLINE=1
+# 这一步是「联网下载」：此刻绝不能置 OFFLINE 标志，否则 transformers/hf_hub
+# 会直接拒绝出网（报 LocalEntryNotFoundError: outgoing traffic has been disabled）。
+# OFFLINE 只对运行时有意义，放在下载完之后再设。
 # 先下到 BuildKit cache mount（跨构建复用 470MB），再拷进镜像层。
-# 运行时 HF_HOME 指向 /opt/memex-models，配合 OFFLINE=1 完全离线加载。
 RUN --mount=type=cache,id=hf-model,target=/tmp/hf-cache \
     HF_HOME=/tmp/hf-cache python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')" \
  && mkdir -p /opt/memex-models \
  && cp -a /tmp/hf-cache/. /opt/memex-models/
+
+# 运行时 HF_HOME 指向 /opt/memex-models，配合 OFFLINE=1 完全离线加载
+ENV HF_HOME=/opt/memex-models \
+    TRANSFORMERS_OFFLINE=1 \
+    HF_HUB_OFFLINE=1
+# 自校验：置 OFFLINE 后仍须能从镜像内缓存加载成功。
+# 若这一步炸，说明上面的 cp 路径/HF_HOME 对不上——在构建期就暴露，而不是线上首启。
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2'); print('offline model load OK')"
 
 # ---- runner: 运行时镜像（第三方依赖 + 模型 + 本项目源码）----
 FROM model AS runner

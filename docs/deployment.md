@@ -165,12 +165,30 @@ memex 侧对反代的**唯一要求**（三条）：
 
 ### 5.2 嵌入模型烘焙
 
+**顺序有讲究：先联网下载，再置离线标志。** 下载那一刻不能有
+`TRANSFORMERS_OFFLINE` / `HF_HUB_OFFLINE`——否则 `transformers`/`huggingface_hub`
+直接拒绝出网，构建期就报
+`LocalEntryNotFoundError: ... outgoing traffic has been disabled`（曾踩过，
+见 `.circleci/config.yml` 对应的 build-main 日志）。`OFFLINE` 只对**运行时**
+有意义，故放在下载**之后**：
+
 ```dockerfile
+# 1) 联网下载到 HF_HOME（先下到 BuildKit cache mount，再 cp 进镜像层）
+RUN --mount=type=cache,id=hf-model,target=/tmp/hf-cache \
+    HF_HOME=/tmp/hf-cache python -c "from sentence_transformers import SentenceTransformer; \
+             SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')" \
+ && mkdir -p /opt/memex-models \
+ && cp -a /tmp/hf-cache/. /opt/memex-models/
+
+# 2) 下载完成后再声明离线（运行时不联网）
 ENV HF_HOME=/opt/memex-models \
     TRANSFORMERS_OFFLINE=1 \
     HF_HUB_OFFLINE=1
+
+# 3) 构建期自校验：离线状态下仍能从镜像内缓存加载
 RUN python -c "from sentence_transformers import SentenceTransformer; \
-             SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')"
+             SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2'); \
+             print('offline model load OK')"
 ```
 
 不烘焙的后果：容器首启要联网下 470MB，`initialize` 前挂住；
