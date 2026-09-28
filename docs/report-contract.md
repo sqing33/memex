@@ -96,9 +96,15 @@ regex_word = [A-Za-z0-9_]+
 | 每个原理轴段落 | **40** |
 | `summary`（功能/卡片） | 12 |
 | `intent` | 5 |
+| 卡片 `mechanism_desc` | 20 |
 
 理由：中文 40 字与英文 40 词的信息量差近一倍，按字符算阈值对两种语言不等价。
 `min_principle_units = 40` 是 recall 旧实现 `min_principle_chars = 40` 的等价换算。
+> `mechanism_desc` 单独一行：它是**建向量的机制描述**（`report.schema.json` 里写作
+> `minLength: 20`，按字符；`validator.py` 按单元 `count_units(mech) < 20` 判
+> `principle_too_short`）。与「每个原理轴段落 = 40」**不是同一个字段**，
+> 快速导入路径（`import_/vibecraft.py`）也不得混用两者（`constants.MIN_MECHANISM_UNITS`）。
+
 **这些阈值待 V1/V2 跑出分布后按实测调整**（见 `gaps.md` G23）。
 
 ---
@@ -237,7 +243,7 @@ regex_word = [A-Za-z0-9_]+
 | `too_few_features` | `features` < 3 |
 | `duplicate_feature_key` | `key` 仓内重复 |
 | `blank_principle` | 某轴为空 / 写了 `N/A`、`待补充` 等占位符 |
-| `principle_too_short` | 某轴 < 40 units |
+| `principle_too_short` | 某轴 < 40 units；或卡片 `mechanism_desc` < 20 units |
 | `axis_reuse` | 五原理轴有 3 轴以上正文雷同（归一化后同一文本） |
 | `bad_evidence_path` | 证据路径不存在 |
 | `line_out_of_range` | 行号越界 |

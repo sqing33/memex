@@ -82,6 +82,19 @@ def run_startup_check(cfg: Config, *, load_embedder: bool = True) -> dict[str, A
             "SELECT DISTINCT embedder FROM chunk_vectors WHERE embedder IS NOT NULL"
         ).fetchall()
         used = sorted({str(r["embedder"]) for r in rows})
+        # G11/C4：混模型库**拒启**，不再只 warnings。
+        # 写入路径已由 index.put_chunks 的 assert_embedder 守住（C2），故这里的异构行
+        # 只可能来自外部改动/半程迁移。远程形态下随机失败最贵（agent 拿到的是错向量、
+        # 不是报错），故远程直接 conflict；hash/stdio 侧仅提示（保持本地调试可用）。
+        current = cfg.embedder or meta_embedder
+        if len(used) > 1 and cfg.is_http:
+            raise MemexError(
+                "conflict",
+                "chunk_vectors 存在异构 embedder 行 " + str(used)
+                + "；混模型库会静默毁掉召回质量，拒绝启动。请运行 memex reindex --embedder "
+                + str(current),
+                {"embedders": used, "current": current},
+            )
         if len(used) > 1:
             warnings.append(
                 "chunk_vectors 存在异构 embedder 行 " + str(used) + "；检索会被拒，请运行 memex reindex --embedder <当前>"

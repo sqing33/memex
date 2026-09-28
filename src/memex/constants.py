@@ -81,13 +81,23 @@ MIN_PRINCIPLE_UNITS = 40
 MIN_SUMMARY_UNITS = 12
 MIN_INTENT_UNITS = 5
 
+# 卡片 mechanism_desc（建向量的机制描述）的最低单元数。
+# 注意：它与 MIN_PRINCIPLE_UNITS 不是同一个字段的阈值——report.schema.json 对
+# mechanism_desc 用的是 minLength:20（字符），validator.py 用 units < 20 判
+# principle_too_short。这里显式给常量，避免 vibecraft 快速导入路径把两个阈值
+# 混淆成 40（deployment.md C5 的措辞自相矛盾，以 schema/validator 为准）。
+MIN_MECHANISM_UNITS = 20
+
 # —— 契约占位符（一律视为「空」，docs/report-contract.md §3）——
 BLANK_PLACEHOLDERS = ("n/a", "na", "无", "未知", "待补充", "todo", "tbd", "???")
 
 # —— 五原理轴雷同门禁（G23）——
 # 阈值取「三轴以上雷同即拒」：五轴是五个维度，三轴雷同就没有信息量了，
 # 而四轴雷同 / 五轴全同自然也落在同一条规则内。
-MAX_AXIS_REUSE = 2
+# 判据是 *distinct* 轴数 <= MAX_AXIS_REUSE（validator.py 的 len(set(sigs))）：
+# distinct <= 3 里天然包含「三轴雷同」这一档（a=a=a+b+c 时 distinct=3）。
+# 别改小成 2——那会放行「三轴雷同」，与 report-contract.md §3「三轴以上雷同即拒」冲突。
+MAX_AXIS_REUSE = 3
 # 判定雷同前先剥掉的标点与空白（反引号用 chr 拼，避免源码里出现裸反引号）。
 AXIS_NEGLECT = (" \t\r\n"
     ".,;:!?、，。；：！？「」『』（）"

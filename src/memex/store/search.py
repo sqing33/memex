@@ -116,8 +116,24 @@ def _vector_rank(
         [embedder.model, *fparams],
     ).fetchall()
     if not rows:
-        # embedder 标识不一致时退一步：用任意已有向量（读侧容错）
-        rows = conn.execute(f"{base} WHERE 1=1{frag}", fparams).fetchall()
+        # 这里原本是「退一步：WHERE 1=1 拉任意已有向量」的读侧容错。那等于把
+        # 「索引根本不是这个模型建的」伪装成「查不到」——换 embedder 未 reindex 时
+        # 会拿错模型的向量当候选，不报错只静默毁掉召回质量（G11/C1）。
+        # 判据：该 embedder 在全库**一条向量都没有**、而表里却有别的模型的向量，
+        # 就是混模型，必须报 conflict 指路 reindex。
+        mine = conn.execute(
+            "SELECT 1 FROM chunk_vectors WHERE embedder = ? LIMIT 1", (embedder.model,)
+        ).fetchone()
+        if mine is None:
+            others = conn.execute("SELECT 1 FROM chunk_vectors LIMIT 1").fetchone()
+            if others is not None:
+                raise MemexError(
+                    "conflict",
+                    "向量索引与当前嵌入器不一致：库里没有 embedder=" + embedder.model
+                    + " 的向量；请先运行 memex reindex --embedder " + embedder.model,
+                    {"embedder": embedder.model, "reason": "embedder_mismatch"},
+                )
+        return []  # 该模型无向量且全表为空（索引尚未建）/ 过滤后无候选，都是正常空结果
     scored: list[tuple[float, str]] = []
     for r in rows:
         try:

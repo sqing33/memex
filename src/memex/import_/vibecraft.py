@@ -26,7 +26,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from ..constants import CONTRACT_ID, CONTRACT_VERSION, MIN_PRINCIPLE_UNITS, PRINCIPLE_KEYS, REGEX_CJK
+from ..constants import CONTRACT_ID, CONTRACT_VERSION, MIN_MECHANISM_UNITS, PRINCIPLE_KEYS, REGEX_CJK
 from ..core import Config, MemexError, Paths, count_units, is_blank, repo_id_for, slugify
 from ..embeddings import get_embedder
 from ..store import db
@@ -238,8 +238,15 @@ def _validate_card_minimal(card: dict[str, Any]) -> list[dict[str, Any]]:
         add("blank_principle", "card.mechanism_desc", "mechanism_desc 为空")
     elif _has_cjk(md):
         add("unicode_language_mismatch", "card.mechanism_desc", "mechanism_desc 必须英文")
-    elif count_units(md) < 20:
-        add("principle_too_short", "card.mechanism_desc", "mechanism_desc 不足 20 单元")
+    elif count_units(md) < MIN_MECHANISM_UNITS:
+        # mechanism_desc 的阈值 = 20 单元（validator.py 判据、schema minLength:20 语义），
+        # 与原理轴的 MIN_PRINCIPLE_UNITS(=40) 是两回事，不可混用。
+        # 旧实现硬编码 20：同一张卡在 vibecraft 路径合法、在契约路径非法（C5）。
+        add(
+            "principle_too_short",
+            "card.mechanism_desc",
+            "mechanism_desc 不足 " + str(MIN_MECHANISM_UNITS) + " 单元",
+        )
     spans = card.get("code_spans") or []
     if kind in ("snippet", "skeleton"):
         if not spans:

@@ -18,6 +18,7 @@ import sqlite3
 from typing import Any, Iterable
 
 from ..constants import KIND_PRIOR
+from ..core import MemexError
 from ..embeddings import Embedder, pack_vector
 from ..store.db import json_loads
 
@@ -139,10 +140,30 @@ def drop_chunks_by_ref(conn: sqlite3.Connection, kind: str, ref_ids: Iterable[st
     return n
 
 
+def assert_embedder(conn: sqlite3.Connection, embedder: Embedder) -> None:
+    """G11/C2：写入向量前断言库的 embedder 标识与本次写入一致。
+
+    混模型写入从不报错，只是让两种向量空间混进同一张 chunk_vectors——读侧再想
+    区分已经晚了（C1 只能拒、不能修）。所以守在执行写入的唯一入口 put_chunks：
+    **不同源就拒绝写**。meta 尚无 embedder（未 init 的老库）时放行，由 reindex/init 补写。
+    """
+    from .db import get_meta
+
+    known = get_meta(conn, "embedder")
+    if known and known != embedder.model:
+        raise MemexError(
+            "conflict",
+            "拒绝写入：本次 embedder=" + embedder.model + "，库 meta.embedder=" + known
+            + "；请先运行 memex reindex --embedder " + embedder.model,
+            {"embedder": embedder.model, "meta_embedder": known},
+        )
+
+
 def put_chunks(conn: sqlite3.Connection, embedder: Embedder, rows: list[dict[str, Any]]) -> int:
     """写入一批块：先删同名旧块（幂等），再落 chunks + 向量 + FTS。返回写入数。"""
     if not rows:
         return 0
+    assert_embedder(conn, embedder)
     _drop_chunks(conn, [r["chunk_id"] for r in rows])
     texts = [r["text"] for r in rows]
     vectors = embedder.embed(texts)

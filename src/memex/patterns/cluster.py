@@ -202,7 +202,8 @@ def recluster(conn: sqlite3.Connection, cfg: Config, *, threshold: float = DEFAU
     from ..store.db import json_dumps
     from ..store.index import chunk_id_for, put_chunks
 
-    cards = _load_cards(conn, _embedder_for(conn))
+    emb = _embedder_for(conn, cfg)
+    cards = _load_cards(conn, emb)
     groups_by_repo = {r["repo_id"]: _source_group(conn, r["repo_id"]) for r in conn.execute("SELECT repo_id FROM repos").fetchall()}
 
     all_clusters = cluster_cards(cards, threshold=threshold)
@@ -257,7 +258,10 @@ def recluster(conn: sqlite3.Connection, cfg: Config, *, threshold: float = DEFAU
         patterns_written += 1
 
     if chunk_rows:
-        put_chunks(conn, _embedder_for(conn), chunk_rows)
+        # 必须复用上面那一个句柄：旧实现每次现取 _embedder_for(conn)，在装了
+        # sentence-transformers 但 meta.embedder 仍是 hash 的库上，卡片向量读成 ST、
+        # pattern 块却写成 hash——两种向量空间混进同一张 chunk_vectors（C3）。
+        put_chunks(conn, emb, chunk_rows)
     return {
         "patterns": patterns_written,
         "clusters_seen": len(all_clusters),
@@ -267,11 +271,16 @@ def recluster(conn: sqlite3.Connection, cfg: Config, *, threshold: float = DEFAU
     }
 
 
-def _embedder_for(conn: sqlite3.Connection) -> Embedder:
+def _embedder_for(conn: sqlite3.Connection, cfg: Config) -> Embedder:
+    """以传入 cfg 为准（cfg.embedder 显式给了就用它），否则退回库 meta。
+
+    旧实现只读 meta、忽略调用方已拿到的 cfg——于是 reindex 里 Config.from_env()
+    解析出的规格与库里记的规格可能指向两个模型，两种向量混进同一张表（C3）。
+    """
     from ..embeddings import get_embedder
     from ..store.db import get_meta
 
-    spec = get_meta(conn, "embedder")
+    spec = cfg.embedder or get_meta(conn, "embedder")
     return get_embedder(spec)
 
 
