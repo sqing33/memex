@@ -25,7 +25,7 @@
 | `MEMEX_GIT_TOKEN__<host>` | 空 | 私有仓凭据，host 里的 `.` 换成 `_`。例：`MEMEX_GIT_TOKEN__github_com=ghp_…` |
 | `MEMEX_HOST_META` | `on` | 抓取时是否打宿主元数据 API（取 `identity_key` / `fork_of` / `stars` / `license` / `description`）。**开 = 身份可校验**（G10 写侧）；关 = 只按 `owner/name` 判身份并记 warning，fork 字段留空（G6 零假成功：不猜）|
 | `MEMEX_GIT_MIRROR` | 空 | 镜像前缀，如 `https://git-mirror.corp/`；抓取时把 `github.com/<o>/<n>` 重写为 `<mirror><o>/<n>`（G22）。**探测** `git ls-remote <mirror> HEAD`：失败则记 `warnings` 并按原 host **回落直连**。凭据仍按**原始 host** 取（`MEMEX_GIT_TOKEN__github_com`），不按镜像 host |
-| `MEMEX_ALLOW_LOCAL_PATHS` | stdio 下 `true`，`serve-http` 下强制 `false` | 是否允许 `local:` / 裸目录路径（G6） |
+| `MEMEX_ALLOW_LOCAL_PATHS` | stdio 下 `true`，`serve-http` 下**恒 `false`** | 是否允许 `local:` / 裸目录路径（G6）。**远程形态不接受用环境变量打开**：`serve-http` 入口无条件钉死为 `false`，设了也无效（deployment.md A3/D5） |
 | `MEMEX_CLONE_TIMEOUT` | `300` | 秒（G17） |
 | `MEMEX_CLONE_CONCURRENCY` | `3` | 全局并发 clone 数（G7） |
 
@@ -92,20 +92,37 @@ git clone https://$TOKEN@github.com/me/private.git
 > 远程常驻时纯靠「下一次调用」不够——没人调用就永远不清扫，
 > 故后台线程是必需的，不是可选优化。
 
+### 1.6 远程形态（`serve-http`，E15/E16/E18）
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `MEMEX_PUBLIC_BASE_URL` | 空 | **远程必填**。对外的绝对基址（如 `https://memex.corp.example`），服务端用它拼 T4 的 bundle 下载票据。**缺省则 `serve-http` 直接拒启**（`raise SystemExit(2)`）——否则票据只能退回 `file://`，远程 agent 拉不到（deployment.md B1）|
+| `MEMEX_ALLOWED_ORIGINS` | 空 | 逗号分隔的 Origin 白名单（如 `https://app.corp.example`）。**无 `Origin` 头一律放行**（git/curl/MCP 客户端都不是浏览器）；带了 `Origin` 则必须命中白名单，否则 `403`（A4/B2）|
+| `MEMEX_BUNDLE_TTL_SECONDS` | `3600` | T4 bundle 票据有效期（秒）。过期票据 `403`。**换 `MEMEX_TOKEN` 会使全部在途票据立即失效**（HMAC 密钥即 token，有意，见 §9）|
+
 ---
 
-### 1.1 并发形态（G26 实测）
+### 1.1 并发形态（G26 + A5 连接模型）
 
-`serve-http` 是每请求一线程、共用一个进程与一个 SQLite 连接。
-修复合享连接的线程亲和性 + 放大 accept backlog 后，实测 **n=200 并发客户端全通**
-（单发基线正常，n=8/16/32/64/128/200 均 200/200）。两条都是前提：
+`serve-http` 是每请求一线程，**每线程一个 SQLite 连接**（线程局部，`handlers.Runtime.conn`）。
+旧实现把一条 `sqlite3.Connection` 放在 `Runtime` 上供所有请求线程共用，实测 8 线程并发调
+`list_repos` 即抛 `IndexError: tuple index out of range`：根因不是连接亲和性检查，而是
+pysqlite 的**语句缓存**——并发线程复用同一个 `sqlite3_stmt`，游标被别的线程吃掉。
+因此连接必须线程局部，`Runtime.close()` 逐个释放；这是硬约束，不是可选优化。
+
+实测口径（本机，`tests/test_serve_http_concurrency.py` 同款：8 线程各 5 次请求，
+`threading.Barrier` 同时起跑）：连接改线程局部后 **0 失败**，且 8 个线程确实各持一条连接。
+`n=200` 一类的规模数字**不再写进契约**——旧文档的「n=200 全通」没有可复现的测量脚本，
+只能作为部署后（`MEMEX_PUBLIC_BASE_URL` + 反代就位）的实测项，不作为承诺。
+两条前提仍然成立：
 
 1. SQLite 必须以 serialized 模式编译（`sqlite3.threadsafety >= 3`），
 否则 `connect()` 直接报错拒绝服务，不静默随机崩。
 2. `request_queue_size = 128`（默认 5 会让 n>=64 起被内核重置连接）。
 
-排障时先看 `details.reason`：出现 `SQLite objects created in a thread
-说明是连接亲和性，出现 `ConnectionResetError` 说明是 backlog 不够。
+排障：出现 `SQLite objects created in a thread` 或
+`IndexError: tuple index out of range` 说明连接模型不对（应为每线程一条）；
+出现 `ConnectionResetError` 说明 accept backlog 不够。
 
 
 ## 2. 忽略规则（G16）

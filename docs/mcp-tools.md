@@ -263,7 +263,7 @@
   "properties": {
     "ok": { "const": true },
     "repo": { "$ref": "#/$defs/RepoSummary" },
-    "repo_path": { "type": "string", "description": "本地克隆绝对路径；仅 stdio 本地形态可用" },
+    "repo_path": { "type": "string", "description": "本地克隆绝对路径；**仅 stdio 本地形态**。远程形态该字段**省略**（连 null 都不给，allow_local_paths=false）" },
     "is_new": { "type": "boolean" },
     "warnings": { "type": "array", "items": { "type": "string" } },
     "next_step": { "$ref": "#/$defs/NextStep" }
@@ -272,7 +272,9 @@
 ```
 
 **要点**
-- **`repo_path` 只在本地形态有意义**。远程形态该字段省略，`next_step` 指向 `request_repo_bundle`。
+- **`repo_path` 只在本地形态有意义**。**远程形态该字段恒缺席**（不是 `null`——`additionalProperties:false`
+  且它不是 `required`，服务端直接不写这个键；`allow_local_paths` 远程恒 `false`），`next_step` 指向 `request_repo_bundle`。
+  远程 agent 拿不到服务器路径是**设计如此**，要源码请走 T4。
 - 幂等：同 `(repo_url, ref)` 重复调用返回同一 `repo_id`；`refresh:true` 会重比 `head_sha`，
   不一致则更新 `head_sha` 并给 `is_stale`（B8），**但绝不自动重析**。
 - `subpath` 记在 `repos.subpath`，后续 `get_evidence_pack` 以它为边界（G15）。
@@ -461,7 +463,7 @@
   "required": ["ok", "url", "sha256", "commit_sha"],
   "properties": {
     "ok":         { "const": true },
-    "url":        { "type": "string", "description": "一次性下载地址（带短时签名）" },
+    "url":        { "type": "string", "description": "短时签名只读票据：{MEMEX_PUBLIC_BASE_URL}/bundles/{repo_id}?commit=..&exp=..&sig=..；票据绑定该 commit，**下载后不删文件**（靠 LRU 清理，见 deployment.md §10）" },
     "sha256":     { "type": "string" },
     "bytes":      { "type": "integer" },
     "commit_sha": { "type": "string" },
@@ -1198,9 +1200,10 @@ server 登记，**server 因此不必出网、也不必持私有仓凭据**（G2
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["bundle_path", "repo_url"],
+  "required": ["repo_url"],
   "properties": {
-    "bundle_path": { "type": "string", "description": "调用方给出的本地 bundle 文件路径（stdio 形态）；HTTP 形态走上传体" },
+    "bundle_path": { "type": "string", "description": "调用方给出的服务器本地 bundle 文件路径（**仅 stdio 形态**；远程形态路径送不进来，改用 bundle_url）。与 bundle_url 二选一" },
+    "bundle_url":  { "type": "string", "description": "**远程形态主路径**：服务端可匿名 GET 的 http(s) 直链（如预签名 OSS/S3 URL）。与 bundle_path 二选一；只接受 http(s)" },
     "repo_url":    { "type": "string", "description": "该 bundle 声称的原始仓地址，用于登记 repo_id 与 full_name" },
     "ref":         { "type": "string", "description": "希望 checkout 的 ref；省略用 bundle 的 HEAD" },
     "subpath":     { "type": "string", "description": "monorepo 子目录（G15）" },
@@ -1220,7 +1223,7 @@ server 登记，**server 因此不必出网、也不必持私有仓凭据**（G2
     "repo":       { "$ref": "#/$defs/RepoSummary" },
     "commit_sha": { "type": "string" },
     "bytes":      { "type": "integer" },
-    "repo_path":  { "type": "string", "description": "server 侧克隆路径" },
+    "repo_path":  { "type": "string", "description": "server 侧克隆路径；**仅 stdio 本地形态**，远程形态恒缺席（同 T1）" },
     "is_new":     { "type": "boolean" },
     "warnings":   { "type": "array", "items": { "type": "string" } },
     "next_step":  { "$ref": "#/$defs/NextStep" }
@@ -1231,6 +1234,11 @@ server 登记，**server 因此不必出网、也不必持私有仓凭据**（G2
 **要点**
 - 流程：`git bundle verify` → `git clone <bundle> <repos_dir>/<repo_id>` → 登记 `repos`
   （`source='upload'`）→ 后续与 `fetch_repo` 完全同路（`get_evidence_pack` / `begin_analysis` …）。
+- **二选一**：`bundle_path`（**仅 stdio**——那是服务器本地路径）与 `bundle_url`（**远程主路径**，
+  服务端匿名 GET 的预签名直链）必须给且只给一个，否则 `invalid_argument`。远程形态下 agent
+  手里没有服务器路径，`bundle_path` 送不进来——这正是补 `bundle_url` 的原因（deployment.md A2/D3）。
+- **下载也受上限约束**：`bundle_url` 是边下边数，超 `MEMEX_MAX_BUNDLE_BYTES` 即中止并删残片，
+  不会先把磁盘写满再报错；且只接受 http(s)，`file://` 会被拒（否则等于给了远程 agent 一个读服务器本地文件的入口）。
 - **上限** `MEMEX_MAX_BUNDLE_BYTES`（默认 512MB，`operations.md` §1.3）→ 超限 `invalid_argument`。
 - **与 T4 对偶**：T4 `request_repo_bundle` 是 server → agent（下发）；T17 是 agent → server（上传）。
 - **`sha256` 给了就不姑息**：不符 `invalid_argument` 且不留半个登记行（先校验后落库）。

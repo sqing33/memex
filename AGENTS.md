@@ -51,7 +51,7 @@
 | 文件 | 管什么 |
 |---|---|
 | `docs/solution-analysis.md` | 需求拆解、生态调研、方案取舍与理由（为什么是 agent 驱动） |
-| `docs/tech-design.md` | 技术设计：模块、**13 张表**、检索与聚类、部署形态、VibeCraft 对照 |
+| `docs/tech-design.md` | 技术设计：模块、**14 张表**、检索与聚类、部署形态、VibeCraft 对照 |
 | `docs/report.schema.json` | 报告契约的机器可读 schema（`x-contract-id = memex/report/1`） |
 | `docs/report-contract.md` | 报告契约散文版：4 个固定 H2、五原理轴、五类卡片定义 + 正/反例 |
 | `docs/mcp-tools.md` | **17 个 MCP 工具**的入参/出参、全局约定、错误模型、注解表 |

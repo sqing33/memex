@@ -224,7 +224,8 @@ memex serve-http --host 127.0.0.1 --port 8931
 
 远程形态下 agent 在开发机上**读不到服务器的克隆目录**，
 所以 `fetch_repo` 之后要用 `request_repo_bundle` 把仓库以 `git bundle` 单文件下发。
-细节见 `docs/tech-design.md` 第四章。
+架构理由见 `docs/tech-design.md` 第四章，
+**终态的可执行规格（Docker 镜像、端点、配置、待实现清单）见 `docs/deployment.md`**。
 
 ---
 
@@ -240,6 +241,7 @@ memex serve-http --host 127.0.0.1 --port 8931
 | `docs/report.schema.json` | 报告契约（机器可读）`memex/report/1` |
 | `docs/report-contract.md` | 报告契约（散文）：四 H2 骨架、五原理轴、卡片五类正反例、中英分层规则 |
 | `docs/operations.md` | 环境变量、子命令、启动检查、危险操作、故障处置 |
+| `docs/deployment.md` | **最终形态部署规格**：Docker 镜像、三个 HTTP 端点、认证与限流、客户端接入、待实现改动清单 |
 
 > `decisions.md` 记「已定 + 理由」，`gaps.md` 记「未定 + 建议」——两份互补。
 

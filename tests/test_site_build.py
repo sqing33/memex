@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -172,6 +173,21 @@ def _site_data(repos, patterns=None) -> dict[str, Any]:
     }
 
 
+def _run_npm(args: list[str]) -> subprocess.CompletedProcess:
+    """跨平台跑 npm。
+
+    Windows 上的 npm 是 npm.cmd（批处理 shim），而 subprocess 走 CreateProcess
+    不能直接执行 .cmd——用 shell=False 会报 WinError 2（文件找不到），
+    于是整组前端产物测试连「构建」都进不去（22 个 error 全是它）。
+    POSIX 下保持原样（shell=False，参数不经 shell）。
+    """
+    npm = shutil.which("npm") or "npm"
+    return subprocess.run(
+        [npm, *args], cwd=str(WEB), capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=600, check=False, shell=(os.name == "nt"),
+    )
+
+
 @pytest.fixture(scope="session")
 def built() -> None:
     """只跑 vite 编译那一步（build:renderer），产物由各测试自己喂数据渲染。
@@ -188,10 +204,7 @@ def built() -> None:
         pytest.skip("没装 node，无法构建前端产物")
     if not (WEB / "node_modules").exists():
         pytest.skip("web/node_modules 缺失，先在 web/ 跑 npm install")
-    proc = subprocess.run(
-        ["npm", "run", "build:renderer", "--silent"],
-        cwd=str(WEB), capture_output=True, text=True, timeout=600, check=False,
-    )
+    proc = _run_npm(["run", "build:renderer", "--silent"])
     if proc.returncode != 0:
         pytest.fail("vite build 失败：\n" + (proc.stderr or proc.stdout)[-3000:])
 
@@ -205,7 +218,7 @@ def _render(tmp_path: Path, data: dict[str, Any]) -> Path:
     env = {**os.environ, "MEMEX_SITE_DATA": str(data_file), "MEMEX_SITE_OUT": str(out)}
     proc = subprocess.run(
         ["node", str(WEB / "build" / "prerender.mjs")],
-        cwd=str(WEB), capture_output=True, text=True, timeout=300, check=False, env=env,
+        cwd=str(WEB), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300, check=False, env=env,
     )
     if proc.returncode != 0:
         pytest.fail("预渲染失败：\n" + (proc.stderr or proc.stdout)[-3000:])
@@ -538,7 +551,7 @@ def test_prerender_fails_when_css_missing(built, tmp_path, monkeypatch):
     (fake_web / "build").mkdir(parents=True)
     proc = subprocess.run(
         ["node", str(WEB / "build" / "prerender.mjs")],
-        capture_output=True, text=True, env={**env, "MEMEX_WEB_ROOT": str(fake_web)}, check=False,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", env={**env, "MEMEX_WEB_ROOT": str(fake_web)}, check=False,
     )
     if proc.returncode == 0:
         pytest.skip("prerender.mjs 还没支持 MEMEX_WEB_ROOT 覆盖，跳过")
@@ -562,7 +575,7 @@ def test_prerender_rejects_wrong_schema(tmp_path):
     env = {**os.environ, "MEMEX_SITE_DATA": str(data_file), "MEMEX_SITE_OUT": str(out)}
     proc = subprocess.run(
         ["node", str(WEB / "build" / "prerender.mjs")],
-        cwd=str(WEB), capture_output=True, text=True, timeout=300, check=False, env=env,
+        cwd=str(WEB), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300, check=False, env=env,
     )
     assert proc.returncode != 0, "schema 不匹配必须失败"
     assert "memex/site/999" in proc.stderr, proc.stderr
@@ -575,7 +588,7 @@ def test_prerender_needs_data_and_out(built):
            if k not in ("MEMEX_SITE_DATA", "MEMEX_SITE_OUT")}
     proc = subprocess.run(
         ["node", str(WEB / "build" / "prerender.mjs")],
-        cwd=str(WEB), capture_output=True, text=True, timeout=120, check=False, env=env,
+        cwd=str(WEB), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, check=False, env=env,
     )
     assert proc.returncode != 0
     assert "MEMEX_SITE_DATA" in proc.stderr
