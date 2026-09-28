@@ -1,0 +1,44 @@
+# 依赖 / 虚拟环境
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+
+# 构建产物
+build/
+dist/
+node_modules/
+web/dist/
+web/node_modules/
+site-data.json
+
+# 版本控制 / CI
+.git/
+.gitignore
+.github/
+.circleci/
+
+# memex 运行时状态（绝不进镜像：用户知识库 / 克隆 / 待下发 bundle / 报告）
+*.db
+*.db-wal
+*.db-shm
+.memex/
+repos/
+bundles/
+reports/
+
+# 测试与工具脚本（运行时不需要；Dockerfile 也不 COPY 它们）
+tests/
+tools/
+
+# 编辑器 / 系统
+.DS_Store
+.idea/
+.vscode/
+
+# Agent / worktree 缓存
+.omc/
+.worktrees/

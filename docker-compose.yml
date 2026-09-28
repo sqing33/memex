@@ -1,0 +1,70 @@
+# ============================================================
+# memex — docker compose（单容器远程 MCP 服务）
+# 规格来源：docs/deployment.md §5.4；拓扑见 §2（普通 docker run，反代链路在前）
+#
+# 使用：
+#   cp .env.example .env   # 改 MEMEX_TOKEN / MEMEX_PUBLIC_BASE_URL
+#   docker compose up -d           # 默认现场构建（build: .）
+#   docker compose logs -f         # 看日志（预热嵌入器的进度在这）
+#   docker compose ps              # 看健康（healthcheck 打 /healthz）
+#   docker compose down            # 停止
+#
+# 也可以直接拉 CI 产出的镜像（.circleci/config.yml 每次 main push 构建推送）：
+#   把 `build: .` 注释掉，改用 `image: ghcr.io/sqing33/memex:latest`
+#
+# 服务器上已有完整反代链路（TLS 在那侧终结），容器只提供明文 8931，
+# 端口正常映射——不在这个文件里自带 Caddy/Nginx。
+# ============================================================
+
+services:
+  memex:
+    build: .
+    image: memex:local
+    container_name: memex
+    restart: unless-stopped
+    ports:
+      # 正常映射：容器绑 0.0.0.0:8931，反代链路把它转到外网
+      - "8931:8931"
+    volumes:
+      # E17 真源 + 派生 + 克隆 + 待下发 bundle 全在这个具名卷里
+      - memex-data:/var/lib/memex
+    environment:
+      # 远程形态的库根（deployment.md §5.3）
+      - MEMEX_HOME=/var/lib/memex
+      # 静态 Bearer Token（E16）：只进环境变量，不进镜像、不进 compose 文件本身
+      - MEMEX_TOKEN=${MEMEX_TOKEN:?必须设置}
+      # 票据要拼绝对 URL 给远程 agent；反代换域名时只改这里
+      - MEMEX_PUBLIC_BASE_URL=${MEMEX_PUBLIC_BASE_URL:?必须设置，如 https://memex.example.com}
+      # Origin 白名单（防 DNS rebinding）；缺省与 base_url 同源
+      - MEMEX_ALLOWED_ORIGINS=${MEMEX_ALLOWED_ORIGINS:-}
+      # 烘焙进镜像的模型（deployment.md §5.2）
+      - MEMEX_EMBEDDER=${MEMEX_EMBEDDER:-paraphrase-multilingual-MiniLM-L12-v2}
+      # 三闸（deployment.md §6.4）：不加限制等于把 clone / embed 闸对全网开放
+      - MEMEX_HTTP_QPS_PER_TOKEN=${MEMEX_HTTP_QPS_PER_TOKEN:-10}
+      - MEMEX_CLONE_CONCURRENCY=${MEMEX_CLONE_CONCURRENCY:-3}
+      - MEMEX_EMBED_CONCURRENCY=${MEMEX_EMBED_CONCURRENCY:-1}
+      - MEMEX_BUNDLE_TTL_SECONDS=${MEMEX_BUNDLE_TTL_SECONDS:-3600}
+      - MEMEX_MAX_BUNDLE_BYTES=${MEMEX_MAX_BUNDLE_BYTES:-268435456}
+      - TZ=Asia/Shanghai
+    # SQLite WAL 依赖共享内存，别太小（默认 64MB，模型/并发下会不够）
+    shm_size: "256mb"
+    # 健康检查走 /healthz（不要 Bearer）——预热未完成时返回 200 且 embedder_ready=false，
+    # 因此 start_period 给足，别让首启加载模型把容器判成 unhealthy。
+    # 用 python -c 而不是 curl，省掉镜像里一个包。
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8931/healthz',timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+    # 资源上限：compose 的 deploy.resources 仅 Swarm 生效，普通 up 必须用 cpus/mem_limit
+    cpus: 2
+    mem_limit: 4g
+    pids_limit: 512
+
+volumes:
+  # 具名卷声明（external 避免 compose 用项目名前缀另建一个空卷）
+  memex-data:
+    name: memex-data
+    external: true

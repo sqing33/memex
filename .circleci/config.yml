@@ -1,0 +1,204 @@
+version: 2.1
+
+# ============================================================
+# memex — 主应用镜像构建图
+# 照搬 Benchmark 项目的「main-image」方案：
+#   - main 分支 push 自动触发 双架构镜像构建 + 合并 manifest（每次提交都构建）
+#   - 这是唯一一条工作流；Benchmark 里给 SWE 题 / 池镜像用的手动
+#     Pipeline Definition（swe-image / pool-image）**不复刻**
+#   - 其他分支 push 不运行镜像构建
+#
+# 依赖 CircleCI 项目级环境变量（与 Benchmark 同名）：
+#   GHCR_USERNAME / GHCR_TOKEN —— 推 ghcr.io/sqing33/memex 用
+# ============================================================
+
+executors:
+  python:
+    docker:
+      - image: cimg/python:3.12
+    working_directory: ~/project
+
+jobs:
+  validate-main:
+    executor: python
+    steps:
+      - checkout
+      - run:
+          name: 类型检查 + 跑测试（hash 嵌入器，不联网、不装 sentence-transformers）
+          command: |
+            set -euo pipefail
+            python --version
+            python -m pip install --upgrade pip
+            python -m pip install -e '.[dev]'
+            # 对应 Benchmark 里的 tsc：strict 下零错误。可选依赖（huggingface_hub /
+            # sentence-transformers）此处不装，那几处 import 靠 # type: ignore[import-not-found]
+            # 兜底（memex.embeddings / memex.store.search / memex.evidence.symbols 已关
+            # unused-ignore 警告，其余模块保持严格）。
+            python -m mypy src/memex
+            # 纯标准库 + hash 伪向量：不联网、不载真模型，13 秒内跑完。
+            MEMEX_EMBEDDER=hash:64 python -m pytest tests/ -q -p no:cacheprovider
+
+  build-main-amd64:
+    machine:
+      image: ubuntu-2204:current
+    resource_class: large
+    environment:
+      IMAGE_REPO: ghcr.io/sqing33/memex
+    steps:
+      - checkout
+      - run:
+          name: 构建主应用 amd64
+          command: |
+            set -euo pipefail
+            : "${GHCR_USERNAME:?GHCR_USERNAME 未配置}"
+            : "${GHCR_TOKEN:?GHCR_TOKEN 未配置}"
+            command -v jq >/dev/null
+            printf '%s' "$GHCR_TOKEN" \
+              | docker login ghcr.io --username "$GHCR_USERNAME" --password-stdin
+            docker buildx create --name circleci-builder --driver docker-container --use
+            docker buildx inspect --bootstrap
+            METADATA_FILE=/tmp/build-metadata-amd64.json
+            WORK_DIR=/tmp/workspace
+            mkdir -p "$WORK_DIR"
+            docker buildx build \
+              --provenance=false \
+              --sbom=false \
+              --platform linux/amd64 \
+              --tag "${IMAGE_REPO}:latest-amd64" \
+              --label "org.opencontainers.image.revision=${CIRCLE_SHA1}" \
+              --label "io.ci.workflow-id=${CIRCLE_WORKFLOW_ID}" \
+              --metadata-file "$METADATA_FILE" \
+              --push .
+            DIGEST="$(jq -er '."containerimage.digest"' "$METADATA_FILE")"
+            [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+            printf '%s\n' "$DIGEST" > "$WORK_DIR/digest-amd64.txt"
+      - persist_to_workspace:
+          root: /tmp/workspace
+          paths:
+            - digest-amd64.txt
+
+  build-main-arm64:
+    machine:
+      image: ubuntu-2204:current
+    resource_class: arm.large
+    environment:
+      IMAGE_REPO: ghcr.io/sqing33/memex
+    steps:
+      - checkout
+      - run:
+          name: 构建主应用 arm64
+          command: |
+            set -euo pipefail
+            : "${GHCR_USERNAME:?GHCR_USERNAME 未配置}"
+            : "${GHCR_TOKEN:?GHCR_TOKEN 未配置}"
+            command -v jq >/dev/null
+            printf '%s' "$GHCR_TOKEN" \
+              | docker login ghcr.io --username "$GHCR_USERNAME" --password-stdin
+            docker buildx create --name circleci-builder --driver docker-container --use
+            docker buildx inspect --bootstrap
+            METADATA_FILE=/tmp/build-metadata-arm64.json
+            WORK_DIR=/tmp/workspace
+            mkdir -p "$WORK_DIR"
+            docker buildx build \
+              --provenance=false \
+              --sbom=false \
+              --platform linux/arm64 \
+              --tag "${IMAGE_REPO}:latest-arm64" \
+              --label "org.opencontainers.image.revision=${CIRCLE_SHA1}" \
+              --label "io.ci.workflow-id=${CIRCLE_WORKFLOW_ID}" \
+              --metadata-file "$METADATA_FILE" \
+              --push .
+            DIGEST="$(jq -er '."containerimage.digest"' "$METADATA_FILE")"
+            [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+            printf '%s\n' "$DIGEST" > "$WORK_DIR/digest-arm64.txt"
+      - persist_to_workspace:
+          root: /tmp/workspace
+          paths:
+            - digest-arm64.txt
+
+  build-main-manifest:
+    machine:
+      image: ubuntu-2204:current
+    resource_class: medium
+    environment:
+      IMAGE_REPO: ghcr.io/sqing33/memex
+    steps:
+      - attach_workspace:
+          at: /tmp/workspace
+      - run:
+          name: 校验本次双架构 digest 并合并 latest
+          command: |
+            set -euo pipefail
+            : "${GHCR_USERNAME:?GHCR_USERNAME 未配置}"
+            : "${GHCR_TOKEN:?GHCR_TOKEN 未配置}"
+            command -v jq >/dev/null
+            AMD64_DIGEST="$(tr -d '[:space:]' < /tmp/workspace/digest-amd64.txt)"
+            ARM64_DIGEST="$(tr -d '[:space:]' < /tmp/workspace/digest-arm64.txt)"
+            [[ "$AMD64_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+            [[ "$ARM64_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+            printf '%s' "$GHCR_TOKEN" \
+              | docker login ghcr.io --username "$GHCR_USERNAME" --password-stdin
+            docker buildx create --name circleci-builder --driver docker-container --use
+            docker buildx inspect --bootstrap
+
+            validate_image() {
+              local digest="$1"
+              local architecture="$2"
+              docker buildx imagetools inspect "${IMAGE_REPO}@${digest}" --format '{{json .Image}}' \
+                | jq -e \
+                    --arg architecture "$architecture" \
+                    --arg revision "$CIRCLE_SHA1" \
+                    --arg workflow_id "$CIRCLE_WORKFLOW_ID" \
+                    '.architecture == $architecture
+                     and .os == "linux"
+                     and .config.Labels["org.opencontainers.image.revision"] == $revision
+                     and .config.Labels["io.ci.workflow-id"] == $workflow_id'
+            }
+
+            validate_image "$AMD64_DIGEST" amd64
+            validate_image "$ARM64_DIGEST" arm64
+            docker buildx imagetools create \
+              "${IMAGE_REPO}@${AMD64_DIGEST}" \
+              "${IMAGE_REPO}@${ARM64_DIGEST}" \
+              --tag "${IMAGE_REPO}:latest"
+            docker buildx imagetools inspect "${IMAGE_REPO}:latest"
+
+workflows:
+  version: 2
+  main-image:
+    jobs:
+      - validate-main:
+          filters:
+            branches:
+              only:
+                - main
+            tags:
+              ignore:
+                - /.*/
+      - build-main-amd64:
+          requires: [validate-main]
+          filters:
+            branches:
+              only:
+                - main
+            tags:
+              ignore:
+                - /.*/
+      - build-main-arm64:
+          requires: [validate-main]
+          filters:
+            branches:
+              only:
+                - main
+            tags:
+              ignore:
+                - /.*/
+      - build-main-manifest:
+          requires: [validate-main, build-main-amd64, build-main-arm64]
+          filters:
+            branches:
+              only:
+                - main
+            tags:
+              ignore:
+                - /.*/
