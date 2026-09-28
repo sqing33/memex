@@ -438,7 +438,10 @@ validate-main ──┬─→ build-main-amd64 ──┐
 | `build-main-{amd64,arm64}` | machine executor（`ubuntu-2204:current`）上 `docker buildx build --platform linux/{amd64,arm64}`，push 到 `ghcr.io/sqing33/memex` |
 | `build-main-manifest` | 校验两个 digest 的架构与 label 后 `docker buildx imagetools create` 合并成 `:latest` |
 
-需要在 CircleCI 项目里配的**项目级环境变量**：`GHCR_USERNAME` / `GHCR_TOKEN`（推 ghcr.io 用）；
+凭据来自 CircleCI **组织级 Context `ghcr`**（`GHCR_USERNAME` / `GHCR_TOKEN`，变量名与 Benchmark 同名）：
+三个 build job 各挂一行 `context: ghcr`；`validate-main` 不需要凭据，不挂。
+用 Context 而不是项目级 env，是为了**一次配、所有项目共用**——轮换 token 只改 context 一处。
+（新项目接入照抄：建 context `ghcr` → 给用到它的 job 挂 `context: ghcr`。）
 不需要在平台侧设分支触发器——触发条件写在 workflow 的 `filters` 里。
 
 两个**刻意的取舍**，别在后续改动里丢掉：
